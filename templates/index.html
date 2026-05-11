@@ -1,0 +1,1043 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>배전감리 PQ 심사 교차검증 시스템</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;
+            background: #f0f2f5;
+            color: #333;
+        }
+
+        /* 헤더 */
+        .header {
+            background: linear-gradient(135deg, #1a3a5c 0%, #2d5f8a 100%);
+            color: white;
+            padding: 20px 30px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        .header h1 { font-size: 22px; font-weight: 700; }
+        .header .sub { font-size: 13px; opacity: 0.8; margin-top: 3px; }
+        .header .badge {
+            background: rgba(255,255,255,0.2);
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+        }
+
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+
+        /* 업로드 섹션 */
+        .upload-section {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .upload-section h2 {
+            font-size: 16px;
+            margin-bottom: 16px;
+            color: #1a3a5c;
+            border-bottom: 2px solid #e8ecf0;
+            padding-bottom: 8px;
+        }
+        .upload-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+        .upload-box {
+            border: 2px dashed #c8d6e5;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            position: relative;
+        }
+        .upload-box:hover { border-color: #2d5f8a; background: #f8fafd; }
+        .upload-box.has-file { border-color: #27ae60; background: #f0faf4; }
+        .upload-box .icon { font-size: 32px; margin-bottom: 8px; }
+        .upload-box .label { font-size: 14px; font-weight: 600; color: #555; }
+        .upload-box .hint { font-size: 11px; color: #999; margin-top: 4px; }
+        .upload-box .filename {
+            font-size: 12px; color: #27ae60; margin-top: 8px; font-weight: 600;
+            word-break: break-all;
+        }
+        .upload-box input[type="file"] {
+            position: absolute; inset: 0; opacity: 0; cursor: pointer;
+        }
+
+        .options-row {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+        .options-row label { font-size: 13px; font-weight: 600; color: #555; }
+        .options-row input, .options-row select {
+            padding: 6px 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+
+        .btn-row {
+            display: flex;
+            gap: 10px;
+        }
+        .btn-analyze {
+            background: linear-gradient(135deg, #1a3a5c, #2d5f8a);
+            color: white;
+            border: none;
+            padding: 12px 32px;
+            font-size: 15px;
+            font-weight: 700;
+            border-radius: 8px;
+            cursor: pointer;
+            flex: 1;
+            transition: opacity 0.2s;
+        }
+        .btn-analyze:hover { opacity: 0.9; }
+        .btn-analyze:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-reset {
+            background: #6c757d;
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            font-size: 15px;
+            font-weight: 700;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: opacity 0.2s;
+            white-space: nowrap;
+        }
+        .btn-reset:hover { opacity: 0.85; }
+
+        /* 진행 상태 */
+        .progress-section {
+            background: white;
+            border-radius: 12px;
+            padding: 20px 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            display: none;
+        }
+        .progress-bar-wrap {
+            background: #e8ecf0;
+            border-radius: 20px;
+            height: 24px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #2d5f8a, #3498db);
+            border-radius: 20px;
+            transition: width 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        /* 결과 섹션 */
+        .result-section {
+            display: none;
+        }
+
+        /* 요약 카드 */
+        .summary-cards {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .summary-card {
+            background: white;
+            border-radius: 10px;
+            padding: 16px;
+            text-align: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+        .summary-card .num { font-size: 28px; font-weight: 800; }
+        .summary-card .label { font-size: 12px; color: #888; margin-top: 4px; }
+        .summary-card.pass .num { color: #27ae60; }
+        .summary-card.fail .num { color: #e74c3c; }
+        .summary-card.warn .num { color: #f39c12; }
+        .summary-card.info .num { color: #2d5f8a; }
+
+        /* 점수 현황 */
+        .score-overview {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .score-overview h2 {
+            font-size: 16px; margin-bottom: 16px; color: #1a3a5c;
+            border-bottom: 2px solid #e8ecf0; padding-bottom: 8px;
+        }
+        .score-items { display: flex; flex-direction: column; gap: 10px; }
+        .score-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 16px;
+            background: #f8fafd;
+            border-radius: 8px;
+            border-left: 4px solid #2d5f8a;
+        }
+        .score-item .score-num {
+            width: 28px; height: 28px;
+            background: #1a3a5c; color: white;
+            border-radius: 50%; display: flex;
+            align-items: center; justify-content: center;
+            font-size: 13px; font-weight: 700; flex-shrink: 0;
+        }
+        .score-item .score-name {
+            flex: 1; font-size: 14px; font-weight: 600; color: #333;
+        }
+        .score-item .score-max {
+            font-size: 13px; color: #888; min-width: 50px; text-align: right;
+        }
+        .score-item .score-val {
+            font-size: 18px; font-weight: 800; color: #1a3a5c;
+            min-width: 60px; text-align: right;
+        }
+        .score-item .score-slash {
+            font-size: 16px; color: #bbb; font-weight: 300;
+        }
+        .score-item.total {
+            background: #1a3a5c;
+            border-left-color: #f39c12;
+        }
+        .score-item.total .score-name { color: white; }
+        .score-item.total .score-max { color: rgba(255,255,255,0.7); }
+        .score-item.total .score-val { color: #f1c40f; font-size: 22px; }
+        .score-item.total .score-slash { color: rgba(255,255,255,0.5); }
+
+        /* 교차검증 상세비교표 (종합평가표 형식) */
+        .verify-table-wrap {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            overflow-x: auto;
+        }
+        .verify-table-wrap h2 {
+            font-size: 16px; margin-bottom: 4px; color: #1a3a5c;
+        }
+        .verify-table-wrap .sub-title {
+            font-size: 12px; color: #888; margin-bottom: 12px;
+        }
+        .company-selector {
+            margin-bottom: 12px; display: flex; align-items: center; gap: 8px;
+        }
+        .company-selector select {
+            padding: 5px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px;
+        }
+
+        table.detail-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+            border: 2px solid #1a3a5c;
+        }
+        table.detail-table th {
+            background: #1a3a5c;
+            color: white;
+            padding: 8px 6px;
+            text-align: center;
+            font-weight: 600;
+            font-size: 11px;
+            border: 1px solid #2d5f8a;
+        }
+        table.detail-table td {
+            padding: 6px 8px;
+            border: 1px solid #ccc;
+            text-align: center;
+            vertical-align: middle;
+        }
+        table.detail-table .cat-cell {
+            background: #e8ecf0;
+            font-weight: 700;
+            color: #1a3a5c;
+            text-align: left;
+            padding-left: 10px;
+        }
+        table.detail-table .sub-cell {
+            text-align: left;
+            padding-left: 20px;
+            color: #555;
+        }
+        table.detail-table .subtotal-row td {
+            background: #f0f4f8;
+            font-weight: 600;
+        }
+        table.detail-table .total-row td {
+            background: #1a3a5c;
+            color: white;
+            font-weight: 700;
+            font-size: 13px;
+        }
+        table.detail-table .result-row td {
+            background: #f8fafd;
+            font-weight: 700;
+            font-size: 13px;
+        }
+        .badge-ok { background: #e8f5e9; color: #2e7d32; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        .badge-warning { background: #fff3e0; color: #e65100; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        .badge-error { background: #ffebee; color: #c62828; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        .badge-skip { background: #f5f5f5; color: #999; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+
+        /* 평가표 미리보기 */
+        .eval-preview {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .eval-preview h2 { font-size: 16px; margin-bottom: 12px; color: #1a3a5c; }
+
+        table.eval-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+            text-align: center;
+        }
+        table.eval-table th {
+            background: #2c3e50;
+            color: white;
+            padding: 8px 6px;
+            font-size: 11px;
+        }
+        table.eval-table td {
+            padding: 8px 6px;
+            border: 1px solid #ddd;
+        }
+        table.eval-table .max-row td {
+            background: #ecf0f1;
+            font-weight: 600;
+            font-size: 11px;
+            color: #666;
+        }
+
+        /* 다운로드 버튼 */
+        .btn-download {
+            background: #27ae60;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 14px;
+            font-weight: 700;
+            border-radius: 8px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .btn-download:hover { background: #219a52; }
+
+        /* 상세 데이터 토글 */
+        .detail-toggle {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .detail-toggle summary {
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            color: #1a3a5c;
+        }
+        .detail-toggle pre {
+            margin-top: 12px;
+            background: #f5f7fa;
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            overflow-x: auto;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        /* 폴더 업로드 */
+        .folder-upload {
+            border: 2px dashed #2d5f8a;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            background: #f8fafd;
+            margin-bottom: 12px;
+            position: relative;
+        }
+        .folder-upload:hover { background: #eef3f9; border-color: #1a3a5c; }
+        .folder-upload.has-file { border-color: #27ae60; background: #f0faf4; }
+        .folder-upload .icon { font-size: 36px; }
+        .folder-upload .label { font-size: 15px; font-weight: 700; color: #1a3a5c; margin-top: 4px; }
+        .folder-upload .hint { font-size: 12px; color: #888; margin-top: 4px; }
+        .folder-upload input[type="file"] {
+            position: absolute; inset: 0; opacity: 0; cursor: pointer;
+        }
+        .folder-result {
+            display: flex; gap: 16px; justify-content: center;
+            margin-top: 10px; font-size: 13px;
+        }
+        .folder-result .tag {
+            padding: 4px 12px; border-radius: 6px; font-weight: 600;
+        }
+        .folder-result .tag.pdf { background: #e3f2fd; color: #1565c0; }
+        .folder-result .tag.excel { background: #e8f5e9; color: #2e7d32; }
+        .folder-result .tag.skip { background: #fce4ec; color: #c62828; }
+        .upload-divider {
+            text-align: center; color: #aaa; font-size: 12px; margin: 8px 0;
+            position: relative;
+        }
+        .upload-divider::before, .upload-divider::after {
+            content: ''; position: absolute; top: 50%; width: 40%;
+            height: 1px; background: #ddd;
+        }
+        .upload-divider::before { left: 0; }
+        .upload-divider::after { right: 0; }
+
+        @media (max-width: 768px) {
+            .upload-grid { grid-template-columns: 1fr; }
+            .summary-cards { grid-template-columns: repeat(2, 1fr); }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>배전감리 PQ 심사 교차검증 시스템</h1>
+            <div class="sub">한국전력공사 배전건설부 - 감리용역 적격심사</div>
+        </div>
+        <span class="badge">v1.0</span>
+    </div>
+
+    <div class="container">
+        <!-- 업로드 섹션 -->
+        <div class="upload-section">
+            <h2>파일 업로드</h2>
+
+            <!-- 폴더 일괄 업로드 -->
+            <div class="folder-upload" id="folderBox">
+                <div class="icon">&#128193;</div>
+                <div class="label">폴더 선택 (자동 분류)</div>
+                <div class="hint">업체별 폴더가 들어있는 상위 폴더를 선택하면 PDF/Excel을 자동으로 분류합니다</div>
+                <div class="filename" id="folderName"></div>
+                <div class="folder-result" id="folderResult" style="display:none;"></div>
+                <input type="file" id="folderInput" webkitdirectory directory multiple onchange="onFolderSelect(this)">
+            </div>
+
+            <div class="upload-divider">또는 파일 직접 선택</div>
+
+            <!-- 기존 개별 파일 선택 -->
+            <div class="upload-grid">
+                <div class="upload-box" id="pdfBox">
+                    <div class="icon">&#128196;</div>
+                    <div class="label">업체 제출 PDF (여러 개 선택 가능)</div>
+                    <div class="hint">PQ 심사서류 PDF 파일 - Ctrl+클릭으로 복수 선택</div>
+                    <div class="filename" id="pdfName"></div>
+                    <input type="file" id="pdfFile" accept=".pdf" multiple onchange="onFileSelect(this, 'pdfBox', 'pdfName')">
+                </div>
+                <div class="upload-box" id="excelBox">
+                    <div class="icon">&#128202;</div>
+                    <div class="label">업체 제출 Excel (여러 개 선택 가능)</div>
+                    <div class="hint">PQ심사서류 득점표 Excel 파일 - Ctrl+클릭으로 복수 선택</div>
+                    <div class="filename" id="excelName"></div>
+                    <input type="file" id="excelFile" accept=".xlsx,.xls" multiple onchange="onFileSelect(this, 'excelBox', 'excelName')">
+                </div>
+            </div>
+
+            <div class="options-row">
+                <label>입찰공고일:</label>
+                <input type="date" id="biddingDate" value="2026-03-09">
+                <label>총예정전기공사비:</label>
+                <select id="costTier">
+                    <option value="10억이상">10억원 이상</option>
+                    <option value="5억이상10억미만" selected>10억원 미만 5억원 이상</option>
+                    <option value="5억미만">5억원 미만</option>
+                </select>
+            </div>
+
+            <div class="btn-row">
+                <button class="btn-analyze" id="btnAnalyze" onclick="startAnalysis()">
+                    분석 시작
+                </button>
+                <button class="btn-reset" onclick="resetAll()">
+                    새로고침
+                </button>
+            </div>
+        </div>
+
+        <!-- 진행 상태 -->
+        <div class="progress-section" id="progressSection">
+            <div id="progressText">OCR 분석 중... (첫 실행 시 시간이 소요됩니다)</div>
+            <div class="progress-bar-wrap">
+                <div class="progress-bar" id="progressBar" style="width: 0%">0%</div>
+            </div>
+        </div>
+
+        <!-- 결과 섹션 -->
+        <div class="result-section" id="resultSection">
+            <!-- 요약 카드 -->
+            <div class="summary-cards" id="summaryCards"></div>
+
+            <!-- 점수 현황 -->
+            <div class="score-overview" id="scoreOverview">
+                <h2>평가항목별 점수 현황 (신용도, 작업계획 및 기법 제외)</h2>
+                <div class="score-items" id="scoreItems"></div>
+            </div>
+
+            <!-- 교차검증 상세 비교표 (종합평가표 형식) -->
+            <div class="verify-table-wrap">
+                <h2>교차검증 상세 비교표</h2>
+                <div class="sub-title">사업수행능력 종합평가표 기준 (신용도/작업계획 제외 - 배전담당 평가항목만)</div>
+                <div class="company-selector" id="companySelector" style="display:none;">
+                    <label style="font-size:13px; font-weight:600; color:#555;">업체 선택:</label>
+                    <select id="companySelect" onchange="renderDetailForCompany(this.value)"></select>
+                </div>
+                <table class="detail-table">
+                    <thead>
+                        <tr>
+                            <th style="width:14%">평가항목</th>
+                            <th style="width:6%">배점</th>
+                            <th style="width:20%">평가요소</th>
+                            <th style="width:18%">PDF 추출값</th>
+                            <th style="width:18%">Excel 제출값</th>
+                            <th style="width:8%">판정</th>
+                            <th style="width:16%">비고</th>
+                        </tr>
+                    </thead>
+                    <tbody id="detailVerifyBody"></tbody>
+                </table>
+            </div>
+
+            <!-- 사전심사집계표 미리보기 -->
+            <div class="eval-preview">
+                <h2>사전심사집계표 미리보기</h2>
+                <table class="eval-table">
+                    <thead>
+                        <tr>
+                            <th>순번</th>
+                            <th>업체명</th>
+                            <th>참여감리원<br>(50)</th>
+                            <th>유사용역<br>수행실적(10)</th>
+                            <th>기술개발<br>및 투자(10)</th>
+                            <th>업무<br>중첩도(10)</th>
+                            <th>교체<br>빈도(5)</th>
+                            <th>가점<br>감점</th>
+                            <th>소계</th>
+                        </tr>
+                    </thead>
+                    <tbody id="evalBody"></tbody>
+                </table>
+                <div style="margin-top: 16px; display: flex; gap: 12px; align-items: center;">
+                    <button class="btn-download" onclick="downloadExcel()">
+                        &#128229; 사전심사집계표 엑셀 다운로드
+                    </button>
+                    <span style="font-size: 12px; color: #999;">pq심사내역 평가표 양식에 맞춰 다운로드됩니다</span>
+                </div>
+            </div>
+
+            <!-- 상세 데이터 (접기) -->
+            <details class="detail-toggle">
+                <summary>PDF 추출 원본 데이터 (디버깅용)</summary>
+                <pre id="rawPdfData"></pre>
+            </details>
+            <details class="detail-toggle">
+                <summary>Excel 파싱 원본 데이터 (디버깅용)</summary>
+                <pre id="rawExcelData"></pre>
+            </details>
+        </div>
+    </div>
+
+    <script>
+        // 폴더 업로드에서 분류된 파일
+        window._folderPdfFiles = [];
+        window._folderExcelFiles = [];
+
+        function onFileSelect(input, boxId, nameId) {
+            const box = document.getElementById(boxId);
+            const nameEl = document.getElementById(nameId);
+            if (input.files.length > 1) {
+                box.classList.add('has-file');
+                nameEl.textContent = `${input.files.length}개 파일 선택됨`;
+            } else if (input.files.length === 1) {
+                box.classList.add('has-file');
+                nameEl.textContent = input.files[0].name;
+            } else {
+                box.classList.remove('has-file');
+                nameEl.textContent = '';
+            }
+            // 개별 파일 선택 시 폴더 분류 초기화
+            window._folderPdfFiles = [];
+            window._folderExcelFiles = [];
+            document.getElementById('folderBox').classList.remove('has-file');
+            document.getElementById('folderName').textContent = '';
+            document.getElementById('folderResult').style.display = 'none';
+        }
+
+        function resetAll() {
+            // 폴더 업로드 초기화
+            window._folderPdfFiles = [];
+            window._folderExcelFiles = [];
+            document.getElementById('folderBox').classList.remove('has-file');
+            document.getElementById('folderName').textContent = '';
+            document.getElementById('folderResult').style.display = 'none';
+            document.getElementById('folderInput').value = '';
+
+            // 개별 파일 선택 초기화
+            const pdfInput = document.getElementById('pdfFile');
+            const excelInput = document.getElementById('excelFile');
+            if (pdfInput) { pdfInput.value = ''; }
+            if (excelInput) { excelInput.value = ''; }
+            document.getElementById('pdfBox').classList.remove('has-file');
+            document.getElementById('excelBox').classList.remove('has-file');
+            document.getElementById('pdfName').textContent = '';
+            document.getElementById('excelName').textContent = '';
+
+            // 결과 섹션 숨기기
+            document.getElementById('resultSection').style.display = 'none';
+            document.getElementById('progressSection').style.display = 'none';
+
+            // 결과 내용 초기화
+            document.getElementById('scoreItems').innerHTML = '';
+            document.getElementById('detailVerifyBody').innerHTML = '';
+            document.getElementById('rawPdfData').textContent = '';
+            document.getElementById('rawExcelData').textContent = '';
+            document.getElementById('companySelector').style.display = 'none';
+
+            // 버튼 상태 복원
+            document.getElementById('btnAnalyze').disabled = false;
+
+            // 전역 결과 데이터 초기화
+            window._allResults = null;
+        }
+
+        function onFolderSelect(input) {
+            const files = Array.from(input.files);
+            if (files.length === 0) return;
+
+            // 확장자로 자동 분류
+            const pdfFiles = [];
+            const excelFiles = [];
+            const skipFiles = [];
+
+            files.forEach(f => {
+                const name = f.name.toLowerCase();
+                // 임시파일(~$로 시작) 제외
+                if (f.name.startsWith('~$')) return;
+                if (name.endsWith('.pdf')) {
+                    pdfFiles.push(f);
+                } else if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
+                    excelFiles.push(f);
+                } else {
+                    skipFiles.push(f);
+                }
+            });
+
+            window._folderPdfFiles = pdfFiles;
+            window._folderExcelFiles = excelFiles;
+
+            // UI 업데이트
+            const box = document.getElementById('folderBox');
+            const nameEl = document.getElementById('folderName');
+            const resultEl = document.getElementById('folderResult');
+
+            if (pdfFiles.length > 0) {
+                box.classList.add('has-file');
+                // 최상위 폴더명 표시
+                const topFolder = files[0].webkitRelativePath.split('/')[0];
+                nameEl.textContent = `${topFolder} 폴더 선택됨`;
+                resultEl.style.display = 'flex';
+                resultEl.innerHTML = `
+                    <span class="tag pdf">PDF ${pdfFiles.length}개</span>
+                    <span class="tag excel">Excel ${excelFiles.length}개</span>
+                    ${skipFiles.length > 0 ? `<span class="tag skip">기타 ${skipFiles.length}개 (무시)</span>` : ''}
+                `;
+
+                // 개별 파일 선택 초기화
+                document.getElementById('pdfFile').value = '';
+                document.getElementById('excelFile').value = '';
+                document.getElementById('pdfBox').classList.remove('has-file');
+                document.getElementById('excelBox').classList.remove('has-file');
+                document.getElementById('pdfName').textContent = '';
+                document.getElementById('excelName').textContent = '';
+            } else {
+                box.classList.remove('has-file');
+                nameEl.textContent = '';
+                resultEl.style.display = 'flex';
+                resultEl.innerHTML = '<span class="tag skip">PDF 파일이 없습니다</span>';
+            }
+        }
+
+        function setProgress(pct, text) {
+            const bar = document.getElementById('progressBar');
+            bar.style.width = pct + '%';
+            bar.textContent = pct + '%';
+            if (text) document.getElementById('progressText').textContent = text;
+        }
+
+        function extractBizNum(filename) {
+            // 파일명에서 사업자번호(xxx-xx-xxxxx) 추출
+            const m = filename.match(/(\d{3}-\d{2}-\d{5})/);
+            return m ? m[1] : '';
+        }
+
+        function getSubFolder(file) {
+            // webkitRelativePath에서 하위폴더명 추출 (예: "상위폴더/업체폴더/파일.pdf" → "업체폴더")
+            const path = file.webkitRelativePath || '';
+            const parts = path.split('/');
+            return parts.length >= 2 ? parts[parts.length - 2] : '';
+        }
+
+        function findMatchingExcel(pdfFile, excelFiles) {
+            if (!excelFiles || excelFiles.length === 0) return null;
+            if (excelFiles.length === 1) return excelFiles[0]; // 1개면 무조건 매칭
+
+            // 1순위: 같은 하위폴더에 있는 Excel 매칭 (폴더 업로드 시)
+            const pdfFolder = getSubFolder(pdfFile);
+            if (pdfFolder) {
+                for (let j = 0; j < excelFiles.length; j++) {
+                    if (getSubFolder(excelFiles[j]) === pdfFolder) return excelFiles[j];
+                }
+            }
+
+            // 2순위: 사업자번호로 매칭
+            const pdfBizNum = extractBizNum(pdfFile.name);
+            if (pdfBizNum) {
+                for (let j = 0; j < excelFiles.length; j++) {
+                    if (excelFiles[j].name.includes(pdfBizNum)) return excelFiles[j];
+                }
+            }
+
+            return null;
+        }
+
+        async function startAnalysis() {
+            // 폴더 업로드 파일 우선, 없으면 개별 파일 선택 사용
+            let pdfFiles = window._folderPdfFiles.length > 0
+                ? window._folderPdfFiles
+                : Array.from(document.getElementById('pdfFile').files);
+            let excelFiles = window._folderExcelFiles.length > 0
+                ? window._folderExcelFiles
+                : Array.from(document.getElementById('excelFile').files);
+
+            if (!pdfFiles || pdfFiles.length === 0) {
+                alert('PDF 파일을 선택해주세요.\n폴더 선택 또는 개별 파일 선택을 이용하세요.');
+                return;
+            }
+            const btn = document.getElementById('btnAnalyze');
+            btn.disabled = true;
+            btn.textContent = '분석 중...';
+
+            const progressEl = document.getElementById('progressSection');
+            progressEl.style.display = 'block';
+            document.getElementById('resultSection').style.display = 'none';
+
+            const totalFiles = pdfFiles.length;
+            const biddingDate = document.getElementById('biddingDate').value;
+            const allResults = [];
+
+            for (let i = 0; i < totalFiles; i++) {
+                const pct = Math.floor((i / totalFiles) * 90) + 5;
+                setProgress(pct, `[${i+1}/${totalFiles}] ${pdfFiles[i].name} 분석 중...`);
+
+                const matchedExcel = findMatchingExcel(pdfFiles[i], excelFiles);
+                const formData = new FormData();
+                formData.append('pdf_file', pdfFiles[i]);
+                if (matchedExcel) {
+                    formData.append('excel_file', matchedExcel);
+                }
+                formData.append('bidding_date', biddingDate);
+                formData.append('batch_index', i.toString());
+
+                try {
+                    const resp = await fetch('/api/analyze', {
+                        method: 'POST',
+                        body: formData,
+                    });
+                    const data = await resp.json();
+                    if (data.error) {
+                        allResults.push({ error: data.error, filename: pdfFiles[i].name });
+                    } else {
+                        allResults.push(data);
+                    }
+                } catch (err) {
+                    allResults.push({ error: err.message, filename: pdfFiles[i].name });
+                }
+            }
+
+            setProgress(100, `${totalFiles}개 업체 분석 완료!`);
+            setTimeout(() => {
+                progressEl.style.display = 'none';
+                renderBatchResults(allResults);
+            }, 500);
+
+            btn.disabled = false;
+            btn.textContent = '분석 시작';
+        }
+
+        function renderBatchResults(allResults) {
+            const resultEl = document.getElementById('resultSection');
+            resultEl.style.display = 'block';
+
+            const successResults = allResults.filter(r => !r.error);
+            const errorResults = allResults.filter(r => r.error);
+
+            // 요약 카드
+            const cardsHtml = `
+                <div class="summary-card info">
+                    <div class="num">${allResults.length}</div>
+                    <div class="label">총 업체 수</div>
+                </div>
+                <div class="summary-card pass">
+                    <div class="num">${successResults.length}</div>
+                    <div class="label">분석 성공</div>
+                </div>
+                <div class="summary-card ${errorResults.length > 0 ? 'fail' : 'pass'}">
+                    <div class="num">${errorResults.length}</div>
+                    <div class="label">분석 실패</div>
+                </div>
+                <div class="summary-card info">
+                    <div class="num">${successResults.filter(r => r.verification && r.verification.summary.pass_fail === '적격').length}</div>
+                    <div class="label">적격 업체</div>
+                </div>
+            `;
+            document.getElementById('summaryCards').innerHTML = cardsHtml;
+
+            // 점수 현황 - 업체별 리스트
+            let scoreHtml = '';
+            successResults.forEach((data, idx) => {
+                const e2 = data.eval_data;
+                const items = [
+                    { name: '참여감리원', max: 50, val: e2.참여감리원_점수 || 0 },
+                    { name: '유사용역', max: 10, val: e2.유사용역_점수 || 0 },
+                    { name: '기술개발', max: 10, val: e2.기술개발_점수 || 0 },
+                    { name: '업무중첩', max: 10, val: e2.업무중첩_점수 || 0 },
+                    { name: '교체빈도', max: 5, val: e2.교체빈도_점수 || 0 },
+                    { name: '가감점', max: '', val: e2.가감점 || 0 },
+                ];
+                const total = items.reduce((s, i) => s + (i.val || 0), 0);
+                const pf = data.verification ? data.verification.summary.pass_fail : '-';
+                const pfColor = pf === '적격' ? '#27ae60' : '#e74c3c';
+
+                scoreHtml += `
+                    <div style="margin-bottom:6px; padding:10px 16px; background:#f8fafd; border-radius:8px; border-left:4px solid ${pfColor}; display:flex; align-items:center; gap:10px;">
+                        <div class="score-num">${idx+1}</div>
+                        <div style="flex:1; font-weight:700;">${data.company_name || '업체 ' + (idx+1)}</div>
+                        <div style="font-size:12px; color:#888;">
+                            ${items.map(i => `${i.name} ${i.val ? i.val.toFixed(1).replace(/\.0$/,'') : '-'}`).join(' | ')}
+                        </div>
+                        <div style="font-weight:800; color:#1a3a5c; min-width:60px; text-align:right;">${total.toFixed(1).replace(/\.0$/,'')}점</div>
+                        <span style="color:${pfColor}; font-weight:700; font-size:13px;">${pf}</span>
+                    </div>`;
+            });
+            if (errorResults.length > 0) {
+                errorResults.forEach(r => {
+                    scoreHtml += `
+                        <div style="margin-bottom:6px; padding:10px 16px; background:#fff5f5; border-radius:8px; border-left:4px solid #e74c3c; display:flex; align-items:center; gap:10px;">
+                            <div style="flex:1; font-weight:600; color:#c62828;">${r.filename || '알 수 없음'}</div>
+                            <div style="font-size:12px; color:#e74c3c;">오류: ${r.error}</div>
+                        </div>`;
+                });
+            }
+            document.getElementById('scoreItems').innerHTML = scoreHtml;
+
+            // 교차검증 상세비교표 (종합평가표 형식)
+            window._allSuccessResults = successResults;
+            if (successResults.length > 1) {
+                const sel = document.getElementById('companySelect');
+                sel.innerHTML = successResults.map((r, i) =>
+                    `<option value="${i}">${r.company_name || '업체 ' + (i+1)}</option>`
+                ).join('');
+                document.getElementById('companySelector').style.display = 'flex';
+            } else {
+                document.getElementById('companySelector').style.display = 'none';
+            }
+            if (successResults.length > 0) renderDetailForCompany(0);
+
+            // 평가표 미리보기 - 모든 업체
+            let evalHtml = `
+                <tr class="max-row">
+                    <td>-</td><td>배점</td>
+                    <td>50</td><td>10</td><td>10</td><td>10</td><td>5</td><td>+1~-5</td><td>85</td>
+                </tr>`;
+            successResults.forEach((data, idx) => {
+                const e = data.eval_data;
+                const subtotal = (e.참여감리원_점수 || 0) + (e.유사용역_점수 || 0) +
+                                 (e.기술개발_점수 || 0) + (e.업무중첩_점수 || 0) +
+                                 (e.교체빈도_점수 || 0) + (e.가감점 || 0);
+                evalHtml += `
+                    <tr>
+                        <td>${idx+1}</td>
+                        <td style="font-weight:600;">${e.업체명 || '-'}</td>
+                        <td>${n(e.참여감리원_점수)}</td>
+                        <td>${n(e.유사용역_점수)}</td>
+                        <td>${n(e.기술개발_점수)}</td>
+                        <td>${n(e.업무중첩_점수)}</td>
+                        <td>${n(e.교체빈도_점수)}</td>
+                        <td>${n(e.가감점)}</td>
+                        <td style="font-weight:700; color:#1a3a5c;">${n(subtotal)}</td>
+                    </tr>`;
+            });
+            document.getElementById('evalBody').innerHTML = evalHtml;
+
+            // 원본 데이터
+            document.getElementById('rawPdfData').textContent = JSON.stringify(
+                successResults.map(r => r.pdf_data), null, 2);
+            document.getElementById('rawExcelData').textContent = JSON.stringify(
+                successResults.map(r => r.excel_data), null, 2);
+
+            resultEl.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function n(val) {
+            if (val === null || val === undefined || val === 0) return '-';
+            return typeof val === 'number' ? val.toFixed(1).replace(/\.0$/, '') : val;
+        }
+
+        function cmpVal(pdfVal, excelVal, isText, tolerance) {
+            tolerance = tolerance || 0.5;
+            const pv = isText ? String(pdfVal || '') : (pdfVal || 0);
+            const ev = isText ? String(excelVal || '') : (excelVal || 0);
+            let badge = '', note = '';
+            if (isText) {
+                if (!pv && !ev) { badge = 'skip'; note = ''; }
+                else if (!pv) { badge = 'warning'; note = 'PDF 미확인'; }
+                else if (!ev) { badge = 'warning'; note = 'Excel 미기입'; }
+                else if (pv === ev) { badge = 'ok'; note = ''; }
+                else { badge = 'error'; note = '불일치'; }
+            } else {
+                if (pv === 0 && ev === 0) { badge = 'skip'; note = ''; }
+                else if (pv === 0 && ev > 0) { badge = 'warning'; note = 'PDF 미확인'; }
+                else if (pv > 0 && ev === 0) { badge = 'warning'; note = 'Excel 미기입'; }
+                else if (Math.abs(pv - ev) <= tolerance) { badge = 'ok'; note = ''; }
+                else { badge = 'error'; note = '차이: ' + (pv - ev).toFixed(1); }
+            }
+            const badgeHtml = badge === 'ok' ? '<span class="badge-ok">O</span>' :
+                              badge === 'error' ? '<span class="badge-error">X</span>' :
+                              badge === 'warning' ? '<span class="badge-warning">!</span>' :
+                              '<span class="badge-skip">-</span>';
+            return { badge: badgeHtml, note };
+        }
+
+        function renderDetailForCompany(idx) {
+            const data = window._allSuccessResults[idx];
+            if (!data) return;
+            const p = data.pdf_data || {};
+            const e = data.excel_data || {};
+
+            function row(cat, maxScore, sub, pdfVal, excelVal, opt) {
+                opt = opt || {};
+                const c = opt.isText ? cmpVal(pdfVal, excelVal, true) : cmpVal(pdfVal, excelVal, false, opt.tol);
+                const catTd = cat ? `<td class="cat-cell" rowspan="${opt.rowspan || 1}">${cat}</td>` : '';
+                const maxTd = cat ? `<td rowspan="${opt.rowspan || 1}"><b>${maxScore}</b></td>` : '';
+                const pdfDisplay = opt.isText ? (pdfVal || '-') : n(pdfVal);
+                const excelDisplay = opt.isText ? (excelVal || '-') : n(excelVal);
+                const cls = opt.isSubtotal ? ' class="subtotal-row"' : '';
+                return `<tr${cls}>${catTd}${maxTd}<td class="sub-cell">${sub}</td><td>${pdfDisplay}</td><td>${excelDisplay}</td><td>${c.badge}</td><td style="font-size:11px;color:#888;">${c.note}</td></tr>`;
+            }
+            function subRow(sub, pdfVal, excelVal, opt) {
+                opt = opt || {};
+                const c = opt.isText ? cmpVal(pdfVal, excelVal, true) : cmpVal(pdfVal, excelVal, false, opt.tol);
+                const pdfDisplay = opt.isText ? (pdfVal || '-') : n(pdfVal);
+                const excelDisplay = opt.isText ? (excelVal || '-') : n(excelVal);
+                const cls = opt.isSubtotal ? ' class="subtotal-row"' : '';
+                return `<tr${cls}><td class="sub-cell">${sub}</td><td>${pdfDisplay}</td><td>${excelDisplay}</td><td>${c.badge}</td><td style="font-size:11px;color:#888;">${c.note}</td></tr>`;
+            }
+
+            let html = '';
+
+            // 1. 참여감리원 (50점)
+            html += row('1. 참여감리원', 50, '<b>가. 책임감리원</b>', '', '', {isText:true, rowspan: 12});
+            html += subRow('&nbsp;&nbsp;(1) 등급', p.책임_등급, e.책임_등급, {isText:true});
+            html += subRow('&nbsp;&nbsp;(2) 전기분야경력', p.책임_전기경력_점수, e.책임_전기경력_점수);
+            html += subRow('&nbsp;&nbsp;(3-1) 참여분야 경력', p.책임_배전경력1_점수, e.책임_참여분야1_점수);
+            html += subRow('&nbsp;&nbsp;(3-2) 참여분야 경력', p.책임_배전경력2_점수, e.책임_참여분야2_점수);
+            html += subRow('<b>나. 보조감리원</b>', '', '', {isText:true});
+            html += subRow('&nbsp;&nbsp;(1) 등급', p.보조1_성명 ? '-' : '-', e.보조1_등급, {isText:true});
+            html += subRow('&nbsp;&nbsp;(2) 전기분야경력 + 참여분야', '-', n(e.보조감리원_점수), {isText:true});
+            html += subRow('<b>다. 비상주감리원</b>', '', '', {isText:true});
+            html += subRow('&nbsp;&nbsp;(1) 등급', p.비상주_등급, e.비상주_등급, {isText:true});
+            html += subRow('&nbsp;&nbsp;(2) 전기분야 경력', '-', n(e.비상주_전기경력_점수), {isText:true});
+            html += subRow('소계', n(p.참여감리원_소계), n(e.참여감리원_소계), {isSubtotal:true, isText:true});
+
+            // 2. 유사용역 수행실적 (10점)
+            html += row('2. 유사용역<br>수행실적', 10, '감리업체 실적', p.유사용역_점수, e.유사용역_점수, {rowspan:1});
+
+            // 4. 기술개발 및 투자실적 (10점) - 3.신용도 제외
+            html += row('3. 기술개발<br>및 투자실적', 10, '가. 개발실적', p.기술개발_점수 > 0 ? '-' : '-', e.개발실적_점수, {rowspan:4, isText:true});
+            html += subRow('나. 기술개발 투자실적', '-', n(e.기술투자_점수), {isText:true});
+            html += subRow('다. 교육실적', '-', n(e.교육실적_점수), {isText:true});
+            html += subRow('소계', n(p.기술개발_점수), n(e.기술개발_점수), {isSubtotal:true, isText:true});
+
+            // 5. 업무중첩도 (10점)
+            html += row('4. 업무중첩도', 10, '가. 상주감리원', '-', n(e.상주중첩_점수), {rowspan:3, isText:true});
+            html += subRow('나. 비상주감리원', '-', n(e.비상주중첩_점수), {isText:true});
+            html += subRow('소계', n(p.업무중첩_점수), n(e.업무중첩_점수), {isSubtotal:true, isText:true});
+
+            // 6. 교체빈도 (5점)
+            html += row('5. 교체빈도', 5, '가. 감리업체', '-', n(e.업체교체_점수), {rowspan:3, isText:true});
+            html += subRow('나. 참여감리원', '-', n(e.감리원교체_점수), {isText:true});
+            html += subRow('소계', n(p.교체빈도_점수), n(e.교체빈도_점수), {isSubtotal:true, isText:true});
+
+            // 7. 기타 (가/감점)
+            html += row('6. 기타<br>(가/감점)', '+1~-5', '가. 자격보유', p.가점_자격증, e.가점_자격증, {rowspan:2, tol:0.1});
+            html += subRow('나. 부실벌점', 0, e.부실벌점);
+
+            // 합계
+            const pdfTotal = (p.참여감리원_소계||0) + (p.유사용역_점수||0) + (p.기술개발_점수||0) +
+                             (p.업무중첩_점수||0) + (p.교체빈도_점수||0) + (p.가점_자격증||0);
+            const excelTotal = e.총점 || 0;
+            const totalCmp = cmpVal(pdfTotal, excelTotal, false, 1.0);
+            html += `<tr class="total-row">
+                <td colspan="2" style="text-align:center;">합 계</td>
+                <td>85점</td>
+                <td>${n(pdfTotal)}</td>
+                <td>${n(excelTotal)}</td>
+                <td>${totalCmp.badge}</td>
+                <td style="font-size:11px;">${totalCmp.note}</td>
+            </tr>`;
+
+            // 적격여부
+            const pdfPf = data.verification ? data.verification.summary.pass_fail : '-';
+            const excelPf = excelTotal >= 80 ? '적격' : (excelTotal > 0 ? '실격' : '-');
+            const pfCmp = cmpVal(pdfPf, excelPf, true);
+            html += `<tr class="result-row">
+                <td colspan="2" style="text-align:center; font-size:13px;">적격여부 (80점 이상)</td>
+                <td></td>
+                <td style="color:${pdfPf==='적격'?'#27ae60':'#e74c3c'}; font-size:14px;">${pdfPf}</td>
+                <td style="color:${excelPf==='적격'?'#27ae60':'#e74c3c'}; font-size:14px;">${excelPf}</td>
+                <td>${pfCmp.badge}</td>
+                <td></td>
+            </tr>`;
+
+            document.getElementById('detailVerifyBody').innerHTML = html;
+        }
+
+        function downloadExcel() {
+            window.location.href = '/api/download-excel';
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+uploads/
+증빙/
+*.xlsx
+*.pdf
+*.bat
+클로드 프롬프트.txt
+프롬프트.txt
+.ocr_cache/
+%programdata%/
