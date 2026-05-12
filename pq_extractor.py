@@ -73,10 +73,10 @@ CURRENT_RATIO_SCORE = [
     (0, 0.8),     # 25% 미만
 ]
 
-# 비상주 중첩도 점수표
+# 비상주 중첩도 점수표 (6개소미만=4, 6=3, 7=2, 8=1, 9이상=0)
 NONRESIDENT_OVERLAP_SCORE = {
-    0: 4.0, 1: 4.0, 2: 4.0, 3: 4.0, 4: 4.0, 5: 4.0,
-    6: 3.2, 7: 2.4, 8: 1.6, 9: 0.8,
+    0: 4, 1: 4, 2: 4, 3: 4, 4: 4, 5: 4,
+    6: 3, 7: 2, 8: 1, 9: 0,
 }
 
 # 가점 - 책임감리원 자격보유
@@ -86,6 +86,46 @@ CERT_BONUS = {
     "기사": 0.7,
     "산업기사": 0.5,
 }
+
+# 유사용역 점수표 (사정금액 대비 비율 → 점수)
+SIMILAR_PROJECT_SCORE = [
+    (100, 10.0),   # 100% 이상
+    (80,  9.0),    # 80% 이상
+    (60,  8.0),    # 60% 이상
+    (40,  6.0),    # 40% 이상
+    (0,   4.0),    # 40% 미만
+]
+
+# 비상주감리원 등급 점수 (특급=3, 고급=2, 고급 미만=실격)
+NONRESIDENT_GRADE_SCORE = {
+    "특급": 3.0,
+    "고급": 2.0,
+}
+
+# 기술개발 투자실적 점수표 (A÷B, %, 높은 임계값 순 정렬)
+TECH_INVEST_SCORE = [
+    (3.0, 4.0),    # 3% 이상
+    (2.5, 3.5),    # 2.5% 이상
+    (2.0, 3.0),    # 2% 이상
+    (1.5, 2.5),    # 1.5% 이상
+    (0,   2.0),    # 1.5% 미만
+]
+
+# 개발실적 점수표 (종류별 × 기간비율%)
+# 기간비율은 업체가 기재한 값(100/80/60)을 읽어 해당 타입 기준점수에 적용
+TECH_DEV_SCORE = {
+    '특허':       {100: 1.00, 80: 0.80, 60: 0.60, 0: 0.0},
+    '실용신안':   {100: 0.50, 80: 0.40,            0: 0.0},
+    '전력신기술': {100: 2.00, 80: 1.60,            0: 0.0},
+}
+
+# 교체빈도 감리업체 점수표 (교체율 %, 높은 임계값 순 정렬)
+REPLACEMENT_RATE_SCORE = [
+    (50,  1.0),    # 50% 이상
+    (30,  1.5),    # 30% 이상 50% 미만
+    (10,  2.0),    # 10% 이상 30% 미만
+    (0,   2.5),    # 10% 미만
+]
 
 
 ###############################################################################
@@ -548,51 +588,66 @@ def extract_similar_project(doc):
     if start_page >= 0:
         result["page"] = start_page + 1
 
-        # 시작 페이지부터 최대 10페이지 범위에서 합계/누계 찾기
+        # 시작 페이지부터 최대 10페이지 범위에서 모든 줄 수집
+        all_lines = []
         for page_num in range(start_page, min(start_page + 10, doc.page_count)):
             text = doc[page_num].get_text()
             if not text.strip():
                 break  # 빈 페이지 도달 시 중단
-            lines = [l.strip() for l in text.split('\n') if l.strip()]
+            all_lines.extend([l.strip() for l in text.split('\n') if l.strip()])
 
-            for line in lines:
-                # 합계/누계 금액 추출 (천원 단위)
-                if '누계' in line or '합계' in line:
-                    nums = re.findall(r'[\d,]+', line)
-                    for n in nums:
-                        try:
-                            val = int(n.replace(',', ''))
-                            if val > 10000:
-                                if result["적용금액"] == 0 or val > result["적용금액"]:
-                                    result["적용금액"] = val
-                        except ValueError:
-                            pass
+        # 1. "합계 제출" 키워드 다음 줄들에서 큰 숫자 찾기 (합계 제출값)
+        #    PDF 레이아웃상 합계값이 키워드와 다른 줄에 위치하는 구조 처리
+        for i, line in enumerate(all_lines):
+            if '합계 제출' in line or '합계제출' in line:
+                for j in range(i + 1, min(i + 20, len(all_lines))):
+                    try:
+                        val = int(all_lines[j].replace(',', ''))
+                        if val > 100000:
+                            result["적용금액"] = val
+                            break
+                    except ValueError:
+                        pass
+                break
 
-                # 사정금액
-                if '사정금액' in line:
-                    nums = re.findall(r'[\d,]+', line)
-                    for n in nums:
-                        try:
-                            val = int(n.replace(',', ''))
-                            if val > 10000:
-                                result["사정금액"] = val
-                        except ValueError:
-                            pass
+        # 2. 비율 (사정금액 대비, 예: 912%) - 100% 초과값만
+        for line in all_lines:
+            m = re.search(r'(\d+)\s*%', line)
+            if m:
+                val = int(m.group(1))
+                if val > 100:
+                    result["비율"] = val
 
-                # 비율 (예: 912%)
-                m = re.search(r'(\d+)\s*%', line)
-                if m:
-                    val = int(m.group(1))
-                    if val > 10:
-                        result["비율"] = val
-
-                # 평점/점수
-                if '평점' in line or '평가점수' in line or '평가' in line:
-                    m = re.search(r'(\d+\.?\d*)', line)
-                    if m:
-                        score = float(m.group(1))
+        # 3. 평점/점수 추출 (평점 키워드 다음 줄 포함)
+        for i, line in enumerate(all_lines):
+            if line == '평점':
+                for j in range(i + 1, min(i + 3, len(all_lines))):
+                    try:
+                        score = float(all_lines[j])
                         if 0 < score <= 10:
                             result["점수"] = score
+                            break
+                    except ValueError:
+                        pass
+            elif '평점' in line:
+                m = re.search(r'(\d+\.?\d*)', line)
+                if m:
+                    score = float(m.group(1))
+                    if 0 < score <= 10:
+                        result["점수"] = score
+
+        # 4. 적용금액이 0이면 누계 실적에서 최대값으로 fallback
+        #    "누계 실적" 키워드 다음 줄에서 숫자 추출 후 최대값 사용
+        if result["적용금액"] == 0:
+            for i, line in enumerate(all_lines):
+                if '누계 실적' in line or '누계실적' in line:
+                    for j in range(i + 1, min(i + 5, len(all_lines))):
+                        try:
+                            val = int(all_lines[j].replace(',', ''))
+                            if val > 100000:
+                                result["적용금액"] = max(result["적용금액"], val)
+                        except ValueError:
+                            pass
 
     return result
 
@@ -688,6 +743,378 @@ def extract_financial(doc):
     return result
 
 
+def extract_tech_development(doc, bidding_date=BIDDING_DATE):
+    """기술개발 및 투자실적 추출 (양식2-9, 텍스트 페이지)
+
+    반환 키:
+      개발실적_항목수, 개발실적_계산점수, 개발실적_항목
+      투자액_합계, 매출액_합계, 투자비율, 기술투자_계산점수
+      교육실적_기재점수
+      page
+    """
+    result = {
+        "개발실적_항목수": 0,
+        "개발실적_계산점수": 0.0,
+        "개발실적_항목": [],
+        "투자액_합계": 0,
+        "매출액_합계": 0,
+        "투자비율": 0.0,
+        "기술투자_계산점수": 0.0,
+        "교육실적_기재점수": 0.0,
+        "page": -1,
+    }
+
+    # 입찰공고일 파싱
+    try:
+        bid_dt = datetime.strptime(bidding_date, '%Y-%m-%d')
+    except (ValueError, TypeError):
+        bid_dt = datetime.now()
+
+    # 페이지 탐색: 양식2-9 또는 기술개발투자실적 키워드
+    page_num = smart_find_page(doc, ['양식2-9', '기술개발투자실적', '개발실적'],
+                                range(70, min(100, doc.page_count)), "기술개발")
+    if page_num < 0:
+        return result
+
+    result["page"] = page_num + 1
+
+    # 여러 페이지에 걸쳐 있을 수 있으므로 최대 3페이지 텍스트 합산
+    full_text = ""
+    for pn in range(page_num, min(page_num + 3, doc.page_count)):
+        full_text += get_page_text(doc, pn) + "\n"
+
+    all_lines = [l.strip() for l in full_text.split('\n') if l.strip()]
+
+    # ── 나. 기술개발투자실적 (A/B 합계) ──────────────────────────────
+    def _parse_num(s):
+        try:
+            return int(s.replace(',', '').replace(' ', ''))
+        except (ValueError, AttributeError):
+            return 0
+
+    in_invest = False
+    for i, line in enumerate(all_lines):
+        if '기술개발투자실적' in line or ('나.' in line and '투자' in line):
+            in_invest = True
+        if not in_invest:
+            continue
+
+        # (A) 레이블 직전 큰 숫자 = 투자액 합계
+        if line == '(A)' or '(A)' == line.strip():
+            for j in range(i - 1, max(i - 6, -1), -1):
+                v = _parse_num(all_lines[j])
+                if v > 1_000_000:
+                    result["투자액_합계"] = v
+                    break
+
+        # (B) 레이블 직전 큰 숫자 = 매출액 합계
+        if line == '(B)' or '(B)' == line.strip():
+            for j in range(i - 1, max(i - 6, -1), -1):
+                v = _parse_num(all_lines[j])
+                if v > 10_000_000:
+                    result["매출액_합계"] = v
+                    break
+
+    # 투자비율 계산 (A/B × 100 = %)
+    if result["매출액_합계"] > 0 and result["투자액_합계"] > 0:
+        ratio = result["투자액_합계"] / result["매출액_합계"] * 100
+        result["투자비율"] = round(ratio, 4)
+        result["기술투자_계산점수"] = lookup_score(ratio, TECH_INVEST_SCORE)
+
+    # ── 가. 개발실적 (타입 역산 + 기간 독립 계산) ──────────────────
+    # 형식: 지정일(date) / 유효기간(date) / 비율% / 평점  ← 4줄 1세트
+    # 타입은 섹션 헤더가 보통 잘못 매핑되므로 기재평점/비율로 역산
+    date_pat = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+    score_items = []
+    in_dev = False
+    i = 0
+
+    while i < len(all_lines):
+        line = all_lines[i]
+
+        # 개발실적 섹션 진입
+        if '개발실적' in line and not in_dev:
+            in_dev = True
+
+        # 기술투자실적 또는 교육실적 시작 → 개발실적 파싱 종료
+        if in_dev and ('기술개발투자실적' in line or '교육실적' in line):
+            break
+
+        if not in_dev:
+            i += 1
+            continue
+
+        # 날짜 쌍(지정일 + 유효기간) 감지 → 다음 날짜는 유효기간이므로 건너뜀
+        if (date_pat.match(line) and
+                i + 1 < len(all_lines) and
+                date_pat.match(all_lines[i + 1])):
+
+            reg_date_str = line
+            # 경과년수 계산 (지정일 ~ 입찰공고일)
+            try:
+                reg_dt = datetime.strptime(reg_date_str, '%Y-%m-%d')
+                elapsed_years = (bid_dt - reg_dt).days / 365.25
+            except ValueError:
+                elapsed_years = 0.0
+
+            # 기간 구간 판정
+            if elapsed_years <= 0:
+                calc_bracket, bracket_label = 0, '미래(무효)'
+            elif elapsed_years <= 5:
+                calc_bracket, bracket_label = 100, '5년이하'
+            elif elapsed_years <= 10:
+                calc_bracket, bracket_label = 80, '5~10년'
+            elif elapsed_years <= 20:
+                calc_bracket, bracket_label = 60, '10~20년'
+            else:
+                calc_bracket, bracket_label = 0, '20년초과'
+
+            # 기재 비율%와 평점 탐색 (유효기간 라인 다음부터)
+            stated_ratio = None
+            stated_score = None
+            advance_to = i + 2
+            for j in range(i + 2, min(i + 7, len(all_lines))):
+                tok = all_lines[j]
+                if date_pat.match(tok):
+                    break  # 다음 아이템 시작 → 중단
+                if '%' in tok and stated_ratio is None:
+                    try:
+                        stated_ratio = float(tok.replace('%', '').strip())
+                    except ValueError:
+                        pass
+                elif stated_ratio is not None and stated_score is None:
+                    try:
+                        v = float(tok)
+                        if 0 < v <= 2.5:
+                            stated_score = v
+                            advance_to = j + 1
+                    except ValueError:
+                        pass
+
+            # 타입 역산 (기재평점 / (기재비율/100) = 기준점수)
+            item_type = None
+            if stated_ratio and stated_score and stated_ratio > 0:
+                base = stated_score / (stated_ratio / 100)
+                if abs(base - 2.0) < 0.15:
+                    item_type = '전력신기술'
+                elif abs(base - 1.0) < 0.15:
+                    item_type = '특허'
+                elif abs(base - 0.5) < 0.1:
+                    item_type = '실용신안'
+
+            # 독립 계산: 우리가 계산한 구간 + 역산한 타입으로 재계산
+            if item_type and calc_bracket > 0:
+                calc_score = _dev_score_from_ratio(item_type, calc_bracket)
+            elif item_type:
+                calc_score = 0.0  # 20년 초과 또는 미래 → 인정 안 함
+            else:
+                calc_score = stated_score or 0.0  # 타입 미확인 시 기재값 신뢰
+
+            if stated_ratio is not None:
+                score_items.append({
+                    "type": item_type or "미확인",
+                    "지정일": reg_date_str,
+                    "경과년": round(elapsed_years, 1),
+                    "기재구간": f"{stated_ratio}%",
+                    "계산구간": f"{calc_bracket}%({bracket_label})",
+                    "구간일치": (stated_ratio is not None and
+                                abs(stated_ratio - calc_bracket) < 1),
+                    "기재평점": stated_score,
+                    "계산평점": calc_score,
+                    "일치": abs((stated_score or 0) - calc_score) < 0.02,
+                })
+
+            i = advance_to  # 유효기간+비율+평점 건너뜀
+            continue
+
+        i += 1
+
+    raw_calc = sum(item["계산평점"] for item in score_items)
+    result["개발실적_계산점수"] = round(min(raw_calc, 4.0), 2)
+    result["개발실적_항목수"] = len(score_items)
+    result["개발실적_항목"] = score_items
+
+    # ── 다. 교육실적 기재점수 ────────────────────────────────────────
+    # 소계 뒤 숫자를 탐색하되, 없으면 섹션 시작 후 첫 합계 숫자(>1)를 사용
+    in_edu = False
+    for i, line in enumerate(all_lines):
+        if '교육실적' in line:
+            in_edu = True
+        if not in_edu:
+            continue
+        # 소계 직후 숫자
+        if '소 계' in line or '소계' in line:
+            for j in range(i + 1, min(i + 5, len(all_lines))):
+                try:
+                    v = float(all_lines[j])
+                    if 0 < v <= 4:
+                        result["교육실적_기재점수"] = v
+                        break
+                except ValueError:
+                    pass
+            break
+        # 소계 없으면 첫 합계 점수(1.5~4) 탐색
+        if in_edu:
+            try:
+                v = float(line)
+                if 1.5 <= v <= 4.0:
+                    result["교육실적_기재점수"] = v
+                    break
+            except ValueError:
+                pass
+
+    return result
+
+
+def extract_overlap(doc):
+    """업무중첩도 추출 (양식2-10)
+    - 상주감리원: '실격' 키워드 탐지 → 없으면 6점 만점, 있으면 0점
+    - 비상주감리원: '감리용역' 출현 횟수(비상주 섹션) → NONRESIDENT_OVERLAP_SCORE 적용
+    """
+    result = {
+        "상주_실격": False,
+        "상주_기재점수": 0.0,
+        "상주_계산점수": 0.0,
+        "비상주_현장수": 0,
+        "비상주_기재점수": 0.0,
+        "비상주_계산점수": 0.0,
+        "업무중첩_기재점수": 0.0,
+        "page": -1,
+    }
+
+    page_num = smart_find_page(doc, ['양식2-10', '업무중첩도', '배치현황'],
+                                range(110, min(135, doc.page_count)), "업무중첩도")
+    if page_num < 0:
+        return result
+
+    result["page"] = page_num
+    text = doc[page_num].get_text()
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+
+    # 실격 탐지 (상주감리원 관련 컨텍스트)
+    result["상주_실격"] = '실격' in text
+    result["상주_계산점수"] = 0.0 if result["상주_실격"] else 6.0
+
+    # 상주/비상주 기재점수 추출
+    # 페이지 상단 패턴: 감리원이름들 → '6','6' → 배치기간들 → '4','4' → '10','10'
+    for i, line in enumerate(lines):
+        if line == '6' and i + 1 < len(lines) and lines[i + 1] == '6':
+            result["상주_기재점수"] = 6.0
+            break
+    for i, line in enumerate(lines):
+        if line == '4' and i + 1 < len(lines) and lines[i + 1] == '4':
+            result["비상주_기재점수"] = 4.0
+            break
+
+    # 비상주감리원 현장 수: 하단 현장배치현황 섹션에서 '용역' 포함 라인 카운트
+    # PDF 컬럼 순서로 추출되어 현장명이 '비상주감리원' 라벨보다 먼저 나올 수 있음
+    in_detail = False
+    site_count = 0
+    for line in lines:
+        if '배치현황' in line or '현장명' in line:
+            in_detail = True
+        if in_detail and '용역' in line and len(line) > 3:
+            site_count += 1
+
+    result["비상주_현장수"] = site_count
+    result["비상주_계산점수"] = float(
+        NONRESIDENT_OVERLAP_SCORE.get(min(site_count, 9), 0))
+    result["업무중첩_기재점수"] = result["상주_기재점수"] + result["비상주_기재점수"]
+
+    print(f"  [업무중첩도] p{page_num+1}: 상주={'실격' if result['상주_실격'] else '정상'}({result['상주_계산점수']}점), "
+          f"비상주={site_count}개소→{result['비상주_계산점수']}점")
+    return result
+
+
+def extract_replacement(doc):
+    """교체빈도 추출 (양식2-11)
+    - 가. 감리업체: '%' 라인 직전 숫자 = 교체빈도율 → REPLACEMENT_RATE_SCORE
+    - 나. 참여감리원: 교체일(날짜) 카운트 → 상주×0.5 + 비상주×0.1 감점
+    """
+    result = {
+        "업체_교체율": 0.0,
+        "업체_기재점수": 0.0,
+        "업체_계산점수": 0.0,
+        "감리원_상주교체수": 0,
+        "감리원_비상주교체수": 0,
+        "감리원_기재점수": 0.0,
+        "감리원_계산점수": 0.0,
+        "교체빈도_기재점수": 0.0,
+        "page": -1,
+    }
+
+    page_num = smart_find_page(doc, ['양식2-11', '교체빈도율', '배치감리원수'],
+                                range(118, min(135, doc.page_count)), "교체빈도")
+    if page_num < 0:
+        return result
+
+    result["page"] = page_num
+    text = doc[page_num].get_text()
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+
+    # 가. 감리업체 교체빈도율: '%' 직전 float 값
+    for i, line in enumerate(lines):
+        if line == '%' and i > 0:
+            try:
+                result["업체_교체율"] = float(lines[i - 1])
+                break
+            except ValueError:
+                pass
+    result["업체_계산점수"] = lookup_score(result["업체_교체율"], REPLACEMENT_RATE_SCORE)
+
+    # 업체 기재점수: '가. 감리업체' 섹션 이후 첫 점수값 (0 < v <= 2.5)
+    in_업체 = False
+    for line in lines:
+        if '가.' in line and '감리업체' in line:
+            in_업체 = True
+            continue
+        if in_업체:
+            try:
+                v = float(line)
+                if 0 < v <= 2.5:
+                    result["업체_기재점수"] = v
+                    break
+            except ValueError:
+                pass
+
+    # 나. 참여감리원 교체건수: 날짜 패턴(교체일) 카운트
+    date_pat = re.compile(r'\d{4}[-./]\d{2}[-./]\d{2}')
+    in_participant = False
+    in_nonresident = False
+    상주_교체 = 0
+    비상주_교체 = 0
+
+    for line in lines:
+        if '나.' in line and '참여감리원' in line:
+            in_participant = True
+        if in_participant and '비상주' in line:
+            in_nonresident = True
+        if in_participant and date_pat.match(line):
+            if in_nonresident:
+                비상주_교체 += 1
+            else:
+                상주_교체 += 1
+
+    result["감리원_상주교체수"] = 상주_교체
+    result["감리원_비상주교체수"] = 비상주_교체
+    result["감리원_계산점수"] = round(
+        max(0.0, 2.5 - 상주_교체 * 0.5 - 비상주_교체 * 0.1), 2)
+
+    # 감리원 기재점수: '합계' 이후 첫 점수값
+    for i, line in enumerate(lines):
+        if '합' in line and '계' in line and i + 1 < len(lines):
+            try:
+                result["감리원_기재점수"] = float(lines[i + 1])
+                break
+            except ValueError:
+                pass
+
+    result["교체빈도_기재점수"] = result["업체_기재점수"] + result["감리원_기재점수"]
+    print(f"  [교체빈도] p{page_num+1}: 업체={result['업체_교체율']:.2f}%→{result['업체_계산점수']}점, "
+          f"감리원=상주{상주_교체}/비상주{비상주_교체}건→{result['감리원_계산점수']}점")
+    return result
+
+
 def extract_sanctions(doc):
     """제재내역 (영업정지) 추출 - PyMuPDF 텍스트 사용"""
     result = {
@@ -768,6 +1195,141 @@ def get_cert_bonus(cert_name):
     return 0
 
 
+def lookup_score(value, score_table):
+    """임계값 기반 점수표 조회 (내림차순 임계값 테이블)
+    score_table: [(threshold, score), ...] — 높은 임계값 순서로 정렬
+    value >= threshold 이면 해당 점수 반환
+    """
+    for threshold, score in score_table:
+        if value >= threshold:
+            return score
+    return score_table[-1][1]
+
+
+def lookup_career_score(grade, years, table):
+    """등급+경력년수로 경력점수 조회
+    table 형식: {"특급": [(임계_미만, 점수), ...], ...}
+      - (1, 4.0): years < 1 이면 4.0점
+      - (0, 10.0): 0은 최고구간 표시 → 10.0점
+    """
+    if grade not in table:
+        return 0.0
+    for threshold, score in table[grade]:
+        if threshold == 0:
+            return score  # 최고 구간 (이상 없음)
+        if years < threshold:
+            return score
+    return table[grade][-1][1]
+
+
+def _dev_score_from_ratio(item_type, ratio_pct):
+    """기재된 기간비율%와 타입으로 TECH_DEV_SCORE 기준 점수 반환.
+    ratio_pct: 60 / 80 / 100 (기간비율, 정수)
+    """
+    table = TECH_DEV_SCORE.get(item_type, {})
+    for key in sorted(table.keys(), reverse=True):
+        if ratio_pct >= key - 1:   # 반올림 오차 1 허용
+            return table[key]
+    return 0.0
+
+
+def calculate_scores_by_criteria(pdf_data):
+    """심사기준표를 적용하여 점수를 독립 계산한다.
+
+    pdf_data: analyze_company()가 반환한 중간 결과 dict
+    반환: {
+        "책임_전기경력_계산점수": float,
+        "책임_전기경력_근거": str,
+        "책임_배전경력1_계산점수": float,
+        ...
+    }
+    """
+    calc = {}
+
+    grade = pdf_data.get("책임_등급", "")
+
+    # 1. 책임감리원 전기분야 경력 점수
+    elec_years = pdf_data.get("책임_전기경력_년", 0) or 0
+    if grade in CHIEF_ELEC_CAREER_SCORE:
+        calc["책임_전기경력_계산점수"] = lookup_career_score(grade, elec_years, CHIEF_ELEC_CAREER_SCORE)
+        calc["책임_전기경력_근거"] = f"{grade} {elec_years:.1f}년"
+
+    # 2. 책임감리원 참여분야 경력1 점수 (설계·시공·감리 등 전체)
+    field1_years = pdf_data.get("책임_배전경력1_년", 0) or 0
+    if grade in CHIEF_FIELD_CAREER_SCORE_1:
+        calc["책임_배전경력1_계산점수"] = lookup_career_score(grade, field1_years, CHIEF_FIELD_CAREER_SCORE_1)
+        calc["책임_배전경력1_근거"] = f"{grade} {field1_years:.1f}년"
+
+    # 3. 책임감리원 참여분야 경력2 점수 (감독·감리만)
+    field2_years = pdf_data.get("책임_배전경력2_년", 0) or 0
+    if grade in CHIEF_FIELD_CAREER_SCORE_2:
+        calc["책임_배전경력2_계산점수"] = lookup_career_score(grade, field2_years, CHIEF_FIELD_CAREER_SCORE_2)
+        calc["책임_배전경력2_근거"] = f"{grade} {field2_years:.1f}년 (감독/감리만)"
+
+    # 4. 비상주감리원 등급 점수
+    nonres_grade = pdf_data.get("비상주_등급", "")
+    if nonres_grade in NONRESIDENT_GRADE_SCORE:
+        calc["비상주_등급_계산점수"] = NONRESIDENT_GRADE_SCORE[nonres_grade]
+        calc["비상주_등급_근거"] = nonres_grade
+    elif nonres_grade:
+        calc["비상주_등급_계산점수"] = 0.0
+        calc["비상주_등급_근거"] = f"{nonres_grade} (고급 미만→실격)"
+
+    # 5. 유사용역 점수 (사정금액 대비 비율 기반)
+    ratio = pdf_data.get("유사용역_비율", 0) or 0
+    if ratio > 0:
+        calc["유사용역_계산점수"] = lookup_score(ratio, SIMILAR_PROJECT_SCORE)
+        calc["유사용역_근거"] = f"비율 {ratio}%"
+
+    # 6. 책임감리원 자격증 가점
+    cert = pdf_data.get("책임_자격증", "") or ""
+    calc["가점_계산점수"] = get_cert_bonus(cert)
+    calc["가점_근거"] = cert if cert else "해당없음"
+
+    # 7. 기술개발 투자실적 (A÷B%)
+    invest_ratio = pdf_data.get("기술투자_비율", 0) or 0
+    if invest_ratio > 0:
+        calc["기술투자_계산점수"] = lookup_score(invest_ratio, TECH_INVEST_SCORE)
+        calc["기술투자_근거"] = f"A÷B={invest_ratio:.2f}%"
+
+    # 8. 개발실적 (타입별 기간비율 기반 독립 합산, max 4점)
+    dev_calc = pdf_data.get("개발실적_계산점수", None)
+    dev_cnt = pdf_data.get("개발실적_항목수", 0)
+    if dev_calc is not None and dev_cnt > 0:
+        calc["개발실적_계산점수"] = dev_calc
+        calc["개발실적_근거"] = f"{dev_cnt}건 합산(max4점)"
+
+    # 9. 상주감리원 중첩도
+    overlap_raw = pdf_data.get("overlap_raw", {})
+    if overlap_raw:
+        상주_실격 = overlap_raw.get("상주_실격", False)
+        calc["상주중첩_계산점수"] = 0.0 if 상주_실격 else 6.0
+        calc["상주중첩_근거"] = "실격" if 상주_실격 else "실격없음→만점"
+
+    # 10. 비상주감리원 중첩도
+    site_count = overlap_raw.get("비상주_현장수", -1) if overlap_raw else -1
+    if site_count >= 0:
+        score = float(NONRESIDENT_OVERLAP_SCORE.get(min(site_count, 9), 0))
+        calc["비상주중첩_계산점수"] = score
+        calc["비상주중첩_근거"] = f"{site_count}개소→{score}점"
+
+    # 11. 감리업체 교체빈도
+    replacement_raw = pdf_data.get("replacement_raw", {})
+    if replacement_raw:
+        rate = replacement_raw.get("업체_교체율", 0)
+        calc["업체교체_계산점수"] = lookup_score(rate, REPLACEMENT_RATE_SCORE)
+        calc["업체교체_근거"] = f"교체율{rate:.2f}%→{calc['업체교체_계산점수']}점"
+
+        # 12. 참여감리원 교체빈도
+        상주 = replacement_raw.get("감리원_상주교체수", 0)
+        비상주 = replacement_raw.get("감리원_비상주교체수", 0)
+        score = round(max(0.0, 2.5 - 상주 * 0.5 - 비상주 * 0.1), 2)
+        calc["감리원교체_계산점수"] = score
+        calc["감리원교체_근거"] = f"상주{상주}건/비상주{비상주}건→{score}점"
+
+    return calc
+
+
 ###############################################################################
 # 메인 분석 함수
 ###############################################################################
@@ -826,6 +1388,26 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE):
     if similar["점수"] > 0:
         print(f"  → 평점: {similar['점수']}점")
 
+    # 5.5 기술개발 세부증빙 추출 (양식2-9)
+    print("[5.5/5] 기술개발 세부증빙 추출 중...")
+    tech_dev = extract_tech_development(doc, bidding_date)
+    if tech_dev["page"] > 0:
+        print(f"  → p{tech_dev['page']}: 개발실적 {tech_dev['개발실적_항목수']}건 "
+              f"→ {tech_dev['개발실적_계산점수']}점")
+        if tech_dev["매출액_합계"] > 0:
+            print(f"  → 투자비율 {tech_dev['투자비율']:.2f}% "
+                  f"→ {tech_dev['기술투자_계산점수']}점")
+    else:
+        print("  → 기술개발 페이지 미발견")
+
+    # 5.7 업무중첩도 세부증빙 추출 (양식2-10)
+    print("[5.7/5] 업무중첩도 세부증빙 추출 중...")
+    overlap = extract_overlap(doc)
+
+    # 5.9 교체빈도 세부증빙 추출 (양식2-11)
+    print("[5.9/5] 교체빈도 세부증빙 추출 중...")
+    replacement = extract_replacement(doc)
+
     # 제재내역 추출 (간략)
     sanctions = extract_sanctions(doc)
 
@@ -856,6 +1438,7 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE):
         "비상주_성명": personnel["비상주감리원"]["성명"],
         "비상주_등급": personnel["비상주감리원"]["등급"],
         "유사용역_적용금액": similar["적용금액"],
+        "유사용역_비율": similar.get("비율", 0),
         "유사용역_점수": summary["유사용역"],
         "기술개발_점수": summary["기술개발"],
         "업무중첩_점수": summary["업무중첩도"],
@@ -864,6 +1447,27 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE):
         "영업정지": sanctions["업체_영업정지"],
         "가점_자격증": cert_bonus,
         "업체제출_총점": summary["총점"],
+        # 기술개발 세부증빙 (양식2-9 독립 추출)
+        "기술투자_비율": tech_dev["투자비율"],
+        "기술투자_투자액": tech_dev["투자액_합계"],
+        "기술투자_매출액": tech_dev["매출액_합계"],
+        "기술투자_계산점수": tech_dev["기술투자_계산점수"],
+        "개발실적_계산점수": tech_dev["개발실적_계산점수"],
+        "개발실적_항목수": tech_dev["개발실적_항목수"],
+        "교육실적_기재점수": tech_dev["교육실적_기재점수"],
+        "tech_dev_raw": tech_dev,
+        # 업무중첩도 세부증빙 (양식2-10 독립 추출)
+        "상주중첩_기재점수": overlap["상주_기재점수"],
+        "비상주중첩_기재점수": overlap["비상주_기재점수"],
+        "업무중첩_기재점수": overlap["업무중첩_기재점수"],
+        "상주_실격": overlap["상주_실격"],
+        "비상주_현장수": overlap["비상주_현장수"],
+        "overlap_raw": overlap,
+        # 교체빈도 세부증빙 (양식2-11 독립 추출)
+        "업체교체_기재점수": replacement["업체_기재점수"],
+        "감리원교체_기재점수": replacement["감리원_기재점수"],
+        "교체빈도_기재점수": replacement["교체빈도_기재점수"],
+        "replacement_raw": replacement,
         # 근거 페이지
         "근거페이지": {
             "종합득점표": summary["page"],
@@ -871,8 +1475,14 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE):
             "경력실적": career["page"],
             "유사용역": similar["page"],
             "제재내역": sanctions["page"],
+            "기술개발": tech_dev["page"],
+            "업무중첩도": overlap["page"],
+            "교체빈도": replacement["page"],
         }
     }
+
+    # 심사기준표 기반 점수 독립 계산
+    result["criteria_scores"] = calculate_scores_by_criteria(result)
 
     return result
 

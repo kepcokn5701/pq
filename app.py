@@ -356,54 +356,172 @@ def _extract_career_from_detail(ws, result):
 # 교차검증
 ###############################################################################
 
+def _add_criteria(item, criteria_value, criteria_basis="", pdf_val=None, tolerance=0.1):
+    """비교 항목 dict에 심사기준 계산값 필드를 추가한다."""
+    item["criteria_value"] = criteria_value
+    item["criteria_basis"] = criteria_basis
+    if criteria_value is not None and pdf_val is not None:
+        pv = _safe_num(pdf_val)
+        cv = _safe_num(criteria_value)
+        item["criteria_match"] = abs(pv - cv) <= tolerance
+    else:
+        item["criteria_match"] = None
+    return item
+
+
 def cross_verify(pdf_data, excel_data):
-    """PDF 추출 결과와 Excel 제출 데이터 교차검증"""
+    """PDF 추출 결과와 Excel 제출 데이터 교차검증 (심사기준 계산값 포함)"""
     items = []
+    cs = pdf_data.get("criteria_scores", {})  # 기준표 계산 결과
 
-    items.append(_compare_item("참여감리원", "책임감리원 등급",
-        pdf_data.get("책임_등급", ""), excel_data.get("책임_등급", ""), severity="error"))
+    # 책임감리원 등급 (텍스트 — 기준 계산값 없음)
+    item = _compare_item("참여감리원", "책임감리원 등급",
+        pdf_data.get("책임_등급", ""), excel_data.get("책임_등급", ""), severity="error")
+    _add_criteria(item, None)
+    items.append(item)
 
-    items.append(_compare_item("참여감리원", "책임감리원 성명",
-        pdf_data.get("책임_성명", ""), excel_data.get("책임_성명", ""), severity="warning"))
+    # 책임감리원 성명 (텍스트)
+    item = _compare_item("참여감리원", "책임감리원 성명",
+        pdf_data.get("책임_성명", ""), excel_data.get("책임_성명", ""), severity="warning")
+    _add_criteria(item, None)
+    items.append(item)
 
-    items.append(_compare_numeric("참여감리원", "책임 전기분야경력(년)",
+    # 책임 전기분야 경력(년)
+    item = _compare_numeric("참여감리원", "책임 전기분야경력(년)",
         pdf_data.get("책임_전기경력_년", 0), excel_data.get("책임_전기경력_년", 0),
-        tolerance=0.5, severity="warning"))
+        tolerance=0.5, severity="warning")
+    _add_criteria(item, None)
+    items.append(item)
 
-    items.append(_compare_numeric("참여감리원", "책임 전기분야 점수",
+    # 책임 전기분야 점수 — 기준계산값 비교
+    item = _compare_numeric("참여감리원", "책임 전기분야 점수",
         pdf_data.get("책임_전기경력_점수", 0), excel_data.get("책임_전기경력_점수", 0),
-        tolerance=0.1, severity="error"))
+        tolerance=0.1, severity="error")
+    _add_criteria(item,
+        cs.get("책임_전기경력_계산점수"),
+        cs.get("책임_전기경력_근거", ""),
+        pdf_data.get("책임_전기경력_점수", 0))
+    items.append(item)
 
-    items.append(_compare_numeric("참여감리원", "책임 참여분야1 점수",
+    # 책임 참여분야1 점수 — 기준계산값 비교
+    item = _compare_numeric("참여감리원", "책임 참여분야1 점수",
         pdf_data.get("책임_배전경력1_점수", 0), excel_data.get("책임_참여분야1_점수", 0),
-        tolerance=0.1, severity="error"))
+        tolerance=0.1, severity="error")
+    _add_criteria(item,
+        cs.get("책임_배전경력1_계산점수"),
+        cs.get("책임_배전경력1_근거", ""),
+        pdf_data.get("책임_배전경력1_점수", 0))
+    items.append(item)
 
-    items.append(_compare_numeric("참여감리원", "책임 참여분야2 점수",
+    # 책임 참여분야2 점수 — 기준계산값 비교
+    item = _compare_numeric("참여감리원", "책임 참여분야2 점수",
         pdf_data.get("책임_배전경력2_점수", 0), excel_data.get("책임_참여분야2_점수", 0),
-        tolerance=0.1, severity="error"))
+        tolerance=0.1, severity="error")
+    _add_criteria(item,
+        cs.get("책임_배전경력2_계산점수"),
+        cs.get("책임_배전경력2_근거", ""),
+        pdf_data.get("책임_배전경력2_점수", 0))
+    items.append(item)
 
-    items.append(_compare_item("참여감리원", "비상주감리원 등급",
-        pdf_data.get("비상주_등급", ""), excel_data.get("비상주_등급", ""), severity="error"))
+    # 비상주감리원 등급 — 기준계산값(등급→점수) 추가
+    item = _compare_item("참여감리원", "비상주감리원 등급",
+        pdf_data.get("비상주_등급", ""), excel_data.get("비상주_등급", ""), severity="error")
+    # 등급 비교이므로 criteria_value는 해당 등급에 대한 배점
+    nonres_cv = cs.get("비상주_등급_계산점수")
+    _add_criteria(item,
+        f"{cs.get('비상주_등급_근거','')} → {nonres_cv}점" if nonres_cv is not None else None,
+        cs.get("비상주_등급_근거", ""))
+    items.append(item)
 
-    items.append(_compare_numeric("유사용역", "유사용역 수행실적 점수",
+    # 유사용역 점수 — 기준계산값 비교
+    item = _compare_numeric("유사용역", "유사용역 수행실적 점수",
         pdf_data.get("유사용역_점수", 0),
-        excel_data.get("유사용역_점수", 0), tolerance=0.5, severity="error"))
+        excel_data.get("유사용역_점수", 0), tolerance=0.5, severity="error")
+    _add_criteria(item,
+        cs.get("유사용역_계산점수"),
+        cs.get("유사용역_근거", ""),
+        pdf_data.get("유사용역_점수", 0),
+        tolerance=0.5)
+    items.append(item)
 
-    items.append(_compare_numeric("기술개발", "기술개발 및 투자실적",
-        pdf_data.get("기술개발_점수", 0),
-        excel_data.get("기술개발_점수", 0), tolerance=0.5, severity="warning"))
+    # 기술개발 — 개발실적 (기간비율 × 타입 독립 계산)
+    item = _compare_numeric("기술개발", "가. 개발실적",
+        pdf_data.get("개발실적_점수", pdf_data.get("기술개발_점수", 0)),
+        excel_data.get("개발실적_점수", 0), tolerance=0.5, severity="warning")
+    _add_criteria(item,
+        cs.get("개발실적_계산점수"),
+        cs.get("개발실적_근거", ""),
+        pdf_data.get("개발실적_점수", 0),
+        tolerance=0.5)
+    items.append(item)
 
-    items.append(_compare_numeric("업무중첩", "업무중첩도 점수",
-        pdf_data.get("업무중첩_점수", 0),
-        excel_data.get("업무중첩_점수", 0), tolerance=0.5, severity="warning"))
+    # 기술개발 — 기술투자실적 (A÷B% 독립 계산)
+    item = _compare_numeric("기술개발", "나. 기술투자실적",
+        pdf_data.get("기술투자_점수", 0),
+        excel_data.get("기술투자_점수", 0), tolerance=0.5, severity="warning")
+    _add_criteria(item,
+        cs.get("기술투자_계산점수"),
+        cs.get("기술투자_근거", ""),
+        pdf_data.get("기술투자_점수", 0),
+        tolerance=0.5)
+    items.append(item)
 
-    items.append(_compare_numeric("가점감점", "자격증 가점",
+    # 업무중첩 — 가. 상주감리원
+    item = _compare_numeric("업무중첩", "가. 상주감리원",
+        pdf_data.get("상주중첩_기재점수", 0),
+        excel_data.get("상주중첩_점수", 0), tolerance=0.5, severity="warning")
+    _add_criteria(item,
+        cs.get("상주중첩_계산점수"),
+        cs.get("상주중첩_근거", ""),
+        pdf_data.get("상주중첩_기재점수", 0), tolerance=0.1)
+    items.append(item)
+
+    # 업무중첩 — 나. 비상주감리원
+    item = _compare_numeric("업무중첩", "나. 비상주감리원",
+        pdf_data.get("비상주중첩_기재점수", 0),
+        excel_data.get("비상주중첩_점수", 0), tolerance=0.5, severity="warning")
+    _add_criteria(item,
+        cs.get("비상주중첩_계산점수"),
+        cs.get("비상주중첩_근거", ""),
+        pdf_data.get("비상주중첩_기재점수", 0), tolerance=0.1)
+    items.append(item)
+
+    # 교체빈도 — 가. 감리업체
+    item = _compare_numeric("교체빈도", "가. 감리업체",
+        pdf_data.get("업체교체_기재점수", 0),
+        excel_data.get("업체교체_점수", 0), tolerance=0.5, severity="warning")
+    _add_criteria(item,
+        cs.get("업체교체_계산점수"),
+        cs.get("업체교체_근거", ""),
+        pdf_data.get("업체교체_기재점수", 0), tolerance=0.1)
+    items.append(item)
+
+    # 교체빈도 — 나. 참여감리원
+    item = _compare_numeric("교체빈도", "나. 참여감리원",
+        pdf_data.get("감리원교체_기재점수", 0),
+        excel_data.get("감리원교체_점수", 0), tolerance=0.5, severity="warning")
+    _add_criteria(item,
+        cs.get("감리원교체_계산점수"),
+        cs.get("감리원교체_근거", ""),
+        pdf_data.get("감리원교체_기재점수", 0), tolerance=0.1)
+    items.append(item)
+
+    # 자격증 가점 — 기준계산값 비교
+    item = _compare_numeric("가점감점", "자격증 가점",
         pdf_data.get("가점_자격증", 0), excel_data.get("가점_자격증", 0),
-        tolerance=0.1, severity="warning"))
+        tolerance=0.1, severity="warning")
+    _add_criteria(item,
+        cs.get("가점_계산점수"),
+        cs.get("가점_근거", ""),
+        pdf_data.get("가점_자격증", 0))
+    items.append(item)
 
-    items.append(_compare_numeric("합계", "총점 (신용도 제외)",
+    # 총점 (신용도 제외)
+    item = _compare_numeric("합계", "총점 (신용도 제외)",
         _calc_pdf_total(pdf_data), excel_data.get("총점", 0),
-        tolerance=1.0, severity="error"))
+        tolerance=1.0, severity="error")
+    _add_criteria(item, None)
+    items.append(item)
 
     matched = sum(1 for i in items if i["match"])
     errors = sum(1 for i in items if i["severity"] == "error" and not i["match"])
