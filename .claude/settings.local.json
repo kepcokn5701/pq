@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmd /c \"for /f \"\"tokens=5\"\" %a in \\(''netstat -aon ^| findstr :5002''\\) do taskkill /PID %a /F\")",
+      "Bash(cmd /c \"taskkill /PID 15068 /F & taskkill /PID 17696 /F & taskkill /PID 10600 /F\")",
+      "WebFetch(domain:www.keea.or.kr)"
+    ]
+  }
+}

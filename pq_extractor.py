@@ -1115,6 +1115,87 @@ def extract_replacement(doc):
     return result
 
 
+def extract_keea_certificates(doc):
+    """keea.or.kr 발급 확인서에서 발급번호 추출 (OCR 사용)
+
+    스캔 페이지에서 상단 10-22% 영역을 2x 줌 OCR하여
+    'XXX-XX-XXXXXXXX-XXXX-XXXXX' 형식의 발급번호를 추출한다.
+    감리원 수(보통 3명)만큼 찾으면 조기 종료한다.
+    """
+    certs = []
+    seen = set()
+    pat = re.compile(r'\d{2,4}-\d{2}-\d{7,10}-\d{3,5}-\d{3,6}')
+    name_pat = re.compile(r'^[가-힣]{2,4}$')
+
+    # 양식2-11(교체빈도) 직후 ~ +8페이지 범위에서 탐색
+    start = smart_find_page(doc, ['양식2-11', '교체빈도율'], range(118, min(135, doc.page_count)))
+    if start < 0:
+        start = 120
+    search_range = range(start + 1, min(start + 9, doc.page_count))
+
+    reader = get_reader()
+    mat = fitz.Matrix(2.0, 2.0)  # 2x zoom (속도↑, 정확도 충분)
+
+    for page_num in search_range:
+        # 텍스트가 있는 페이지(양식)는 건너뜀
+        native_text = doc[page_num].get_text().strip()
+        if len(native_text) > 20:
+            continue
+
+        page = doc[page_num]
+        rect = page.rect
+        # 발급번호 영역: 페이지 상단 10~22%
+        top_rect = fitz.Rect(rect.x0, rect.y0 + rect.height * 0.10,
+                             rect.x1, rect.y0 + rect.height * 0.22)
+        pix = page.get_pixmap(matrix=mat, clip=top_rect)
+        img_data = pix.tobytes('png')
+        del pix
+
+        try:
+            results = reader.readtext(img_data, batch_size=1)
+        except Exception:
+            del img_data
+            continue
+        del img_data
+
+        texts = [t for _, t, _ in results]
+        all_text = ' '.join(texts)
+        matches = pat.findall(all_text)
+        if not matches:
+            continue
+
+        issue_no = matches[0]
+        if issue_no in seen:
+            continue
+        seen.add(issue_no)
+
+        # 성명 추출: 발급번호 라인 이후 첫 한글 이름 (2-4글자)
+        name = ""
+        found_no = False
+        for t in texts:
+            if pat.search(t):
+                found_no = True
+                continue
+            if found_no and name_pat.match(t):
+                name = t
+                break
+
+        certs.append({
+            "발급번호": issue_no,
+            "성명": name,
+            "page": page_num,
+        })
+        print(f"    [KEEA] p{page_num+1}: {name} 발급번호={issue_no}")
+
+        # 감리원 3명분 찾으면 조기 종료
+        if len(certs) >= 3:
+            break
+
+    gc.collect()
+    return certs
+
+
+
 def extract_sanctions(doc):
     """제재내역 (영업정지) 추출 - PyMuPDF 텍스트 사용"""
     result = {
@@ -1408,6 +1489,11 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE):
     print("[5.9/5] 교체빈도 세부증빙 추출 중...")
     replacement = extract_replacement(doc)
 
+    # 5.95 KEEA 확인서 발급번호 추출 (OCR)
+    print("[5.95/5] KEEA 확인서 발급번호 OCR 추출 중...")
+    keea_certs = extract_keea_certificates(doc)
+
+
     # 제재내역 추출 (간략)
     sanctions = extract_sanctions(doc)
 
@@ -1468,6 +1554,8 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE):
         "감리원교체_기재점수": replacement["감리원_기재점수"],
         "교체빈도_기재점수": replacement["교체빈도_기재점수"],
         "replacement_raw": replacement,
+        # KEEA 확인서 발급번호
+        "keea_certs": keea_certs,
         # 근거 페이지
         "근거페이지": {
             "종합득점표": summary["page"],

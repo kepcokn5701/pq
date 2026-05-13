@@ -22,6 +22,10 @@ import openpyxl
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 
 # 기존 추출기 임포트
+import requests as http_requests
+import warnings
+warnings.filterwarnings('ignore', message='Unverified HTTPS request')
+
 from pq_extractor import (
     analyze_company, set_current_pdf, _get_cache_dir,
     CHIEF_ELEC_CAREER_SCORE, CHIEF_FIELD_CAREER_SCORE_1,
@@ -36,6 +40,65 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 # 최근 분석 결과 저장 (세션 대용)
 _last_result = {}
 _batch_results = []  # 일괄 분석 결과 (여러 업체)
+
+
+###############################################################################
+# KEEA 확인서 진위여부 조회
+###############################################################################
+
+def verify_keea_certificate(issue_no):
+    """keea.or.kr 발급서류 원본확인 (발급번호로 진위여부 조회)
+
+    Returns: True=확인됨, False=확인불가, None=조회실패
+    """
+    try:
+        s = http_requests.Session()
+        s.get('https://www.keea.or.kr/etic/won/getWON01R01.do',
+              timeout=10, verify=False)
+        r = s.post('https://www.keea.or.kr/etic/won/getWON01R02.do',
+                   data={'srIssueNo': issue_no, 'type': ''},
+                   timeout=10, verify=False)
+        if r.status_code != 200:
+            return None
+        # fileName 값 추출: <input name="fileName" value="..."/>
+        m = re.search(r'name=["\']fileName["\'][^>]*value=["\']([^"\']*)["\']', r.text)
+        if not m:
+            return None
+        return m.group(1) != 'NO'
+    except Exception as e:
+        print(f"  [KEEA 조회 실패] {issue_no}: {e}")
+        return None
+
+
+def verify_all_keea_certs(certs):
+    """여러 발급번호를 일괄 진위확인 (병렬 HTTP 요청)"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    valid_certs = [c for c in certs if c.get("발급번호")]
+    if not valid_certs:
+        return []
+
+    results = [None] * len(valid_certs)
+
+    def _verify(idx, cert):
+        issue_no = cert["발급번호"]
+        verified = verify_keea_certificate(issue_no)
+        status = "O" if verified else ("X" if verified is False else "?")
+        print(f"  [KEEA] {cert.get('성명','')} {issue_no} → 진위여부 {status}")
+        return idx, {
+            "발급번호": issue_no,
+            "성명": cert.get("성명", ""),
+            "page": cert.get("page", -1),
+            "진위확인": verified,
+        }
+
+    with ThreadPoolExecutor(max_workers=min(len(valid_certs), 4)) as executor:
+        futures = [executor.submit(_verify, i, c) for i, c in enumerate(valid_certs)]
+        for future in as_completed(futures):
+            idx, result = future.result()
+            results[idx] = result
+
+    return results
 
 
 ###############################################################################
@@ -740,6 +803,13 @@ def api_analyze():
         # 3. 교차검증
         verification = cross_verify(pdf_data, excel_data)
 
+        # 3.5 KEEA 확인서 진위여부 조회
+        keea_certs = pdf_data.get("keea_certs", [])
+        keea_results = []
+        if keea_certs:
+            print("[KEEA] 확인서 진위여부 조회 중...")
+            keea_results = verify_all_keea_certs(keea_certs)
+
         # 4. 평가표용 데이터
         eval_data = {
             "업체명": pdf_data.get("업체명") or excel_data.get("업체명", ""),
@@ -771,6 +841,7 @@ def api_analyze():
             "excel_data": excel_data,
             "verification": verification,
             "eval_data": eval_data,
+            "keea_results": keea_results,
         })
 
     except Exception as e:

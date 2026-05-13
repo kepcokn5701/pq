@@ -301,6 +301,12 @@
         .badge-warning { background: #fff3e0; color: #e65100; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
         .badge-error { background: #ffebee; color: #c62828; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
         .badge-skip { background: #f5f5f5; color: #999; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+        /* 기준 계산값 컬럼 */
+        table.detail-table .criteria-col { background: #fafbe8; }
+        table.detail-table th.criteria-col { background: #5c6b1a; color: #fff; }
+        .crit-ok { color: #2e7d32; font-weight: 600; }
+        .crit-mismatch { color: #c62828; font-weight: 700; }
+        .crit-basis { display:block; color:#999; font-size:10px; margin-top:1px; }
 
         /* 평가표 미리보기 */
         .eval-preview {
@@ -486,6 +492,9 @@
                     새로고침
                 </button>
             </div>
+            <div style="margin-top:6px; font-size:12px; color:#888;">
+                ※ 화면이 이전과 같다면 강력 새로고침 : <b>Ctrl + Shift + R</b>
+            </div>
         </div>
 
         <!-- 진행 상태 -->
@@ -518,13 +527,14 @@
                 <table class="detail-table">
                     <thead>
                         <tr>
-                            <th style="width:14%">평가항목</th>
-                            <th style="width:6%">배점</th>
-                            <th style="width:20%">평가요소</th>
-                            <th style="width:18%">PDF 추출값</th>
-                            <th style="width:18%">Excel 제출값</th>
-                            <th style="width:8%">판정</th>
-                            <th style="width:16%">비고</th>
+                            <th style="width:12%">평가항목</th>
+                            <th style="width:5%">배점</th>
+                            <th style="width:17%">평가요소</th>
+                            <th style="width:14%" class="criteria-col">기준 계산값</th>
+                            <th style="width:14%">PDF 추출값</th>
+                            <th style="width:14%">Excel 제출값</th>
+                            <th style="width:7%">판정</th>
+                            <th style="width:17%">비고</th>
                         </tr>
                     </thead>
                     <tbody id="detailVerifyBody"></tbody>
@@ -946,91 +956,210 @@
             if (!data) return;
             const p = data.pdf_data || {};
             const e = data.excel_data || {};
+            const cs = p.criteria_scores || {};  // 심사기준 계산 점수
+            const keea = data.keea_results || [];
+            // KEEA 진위확인 결과 요약
+            const keeaAllOk = keea.length > 0 && keea.every(c => c.진위확인 === true);
+            const keeaNote = keeaAllOk
+                ? '<span style="color:#1565c0;font-weight:600;">KEEA 진위확인 O</span>'
+                : (keea.length > 0 ? '<span style="color:#c62828;">KEEA 진위확인 X</span>' : '');
 
-            function row(cat, maxScore, sub, pdfVal, excelVal, opt) {
-                opt = opt || {};
-                const c = opt.isText ? cmpVal(pdfVal, excelVal, true) : cmpVal(pdfVal, excelVal, false, opt.tol);
-                const catTd = cat ? `<td class="cat-cell" rowspan="${opt.rowspan || 1}">${cat}</td>` : '';
-                const maxTd = cat ? `<td rowspan="${opt.rowspan || 1}"><b>${maxScore}</b></td>` : '';
-                const pdfDisplay = opt.isText ? (pdfVal || '-') : n(pdfVal);
-                const excelDisplay = opt.isText ? (excelVal || '-') : n(excelVal);
-                const cls = opt.isSubtotal ? ' class="subtotal-row"' : '';
-                return `<tr${cls}>${catTd}${maxTd}<td class="sub-cell">${sub}</td><td>${pdfDisplay}</td><td>${excelDisplay}</td><td>${c.badge}</td><td style="font-size:11px;color:#888;">${c.note}</td></tr>`;
+            const BOk   = '<span class="badge-ok">O</span>';
+            const BErr  = '<span class="badge-error">X</span>';
+            const BWarn = '<span class="badge-warning">!</span>';
+            const BSkip = '<span class="badge-skip">-</span>';
+
+            // 배점 초과 검증
+            function vMax(val, max) {
+                const v = val || 0;
+                if (v === 0) return { badge: BSkip, note: '' };
+                if (v > max + 0.01) return { badge: BErr, note: `배점(${max}점) 초과!` };
+                return { badge: BOk, note: '' };
             }
-            function subRow(sub, pdfVal, excelVal, opt) {
-                opt = opt || {};
-                const c = opt.isText ? cmpVal(pdfVal, excelVal, true) : cmpVal(pdfVal, excelVal, false, opt.tol);
-                const pdfDisplay = opt.isText ? (pdfVal || '-') : n(pdfVal);
-                const excelDisplay = opt.isText ? (excelVal || '-') : n(excelVal);
-                const cls = opt.isSubtotal ? ' class="subtotal-row"' : '';
-                return `<tr${cls}><td class="sub-cell">${sub}</td><td>${pdfDisplay}</td><td>${excelDisplay}</td><td>${c.badge}</td><td style="font-size:11px;color:#888;">${c.note}</td></tr>`;
+            // 소계 합산 검증
+            function vSum(computed, stated, max) {
+                const s = stated || 0;
+                if (s === 0 && computed === 0) return { badge: BSkip, note: '' };
+                if (s > max + 0.01) return { badge: BErr, note: `배점(${max}점) 초과!` };
+                if (Math.abs(computed - s) > 0.05)
+                    return { badge: BErr, note: `합산불일치 (세부계산 ${computed.toFixed(1)}점 ≠ 기재 ${s.toFixed(1)}점)` };
+                return { badge: BOk, note: '' };
+            }
+            // 텍스트 단순 비교
+            function vText(pv, ev) {
+                if (!pv && !ev) return { badge: BSkip, note: '' };
+                if (!pv) return { badge: BSkip, note: 'PDF 미추출' };
+                if (!ev) return { badge: BWarn, note: 'Excel 미기입' };
+                return pv === ev ? { badge: BOk, note: '' } : { badge: BErr, note: `불일치 (PDF: ${pv})` };
+            }
+
+            // 기준 계산값 표시 (mismatch 시 빨간색)
+            function critFmt(calcScore, pdfScore, basis) {
+                if (calcScore === undefined || calcScore === null) return '-';
+                const calcStr = typeof calcScore === 'number' ? calcScore.toFixed(1) : String(calcScore);
+                const basisHtml = basis ? `<span class="crit-basis">${basis}</span>` : '';
+                const pv = parseFloat(pdfScore) || 0;
+                const cv = parseFloat(calcScore) || 0;
+                if (pv > 0 && Math.abs(pv - cv) > 0.1) {
+                    return `<span class="crit-mismatch">${calcStr}점 ⚠</span>${basisHtml}`;
+                }
+                return `<span class="crit-ok">${calcStr}점</span>${basisHtml}`;
+            }
+
+            // 행 렌더링 헬퍼 (기준계산값 컬럼 포함)
+            function makeRow(cat, allocLabel, sub, critDisp, pdfDisp, excelVal, v, rowspan, isSub) {
+                const catTd = `<td class="cat-cell" rowspan="${rowspan}">${cat}</td><td rowspan="${rowspan}" style="text-align:center;font-size:12px;">${allocLabel}</td>`;
+                const ed = (excelVal === 0 || excelVal === null || excelVal === undefined) ? '-' : (typeof excelVal === 'number' ? String(excelVal).replace(/\.0$/, '') : excelVal);
+                const cls = isSub ? ' class="subtotal-row"' : '';
+                const noteColor = v.note.includes('초과') || v.note.includes('불일치') ? '#c62828' : '#888';
+                return `<tr${cls}>${catTd}<td class="sub-cell">${sub}</td><td class="criteria-col" style="font-size:11px;">${critDisp||'-'}</td><td>${pdfDisp||'-'}</td><td>${ed}</td><td>${v.badge}</td><td style="font-size:11px;color:${noteColor};">${v.note}</td></tr>`;
+            }
+            function addRow(sub, critDisp, pdfDisp, excelVal, v, isSub) {
+                const ed = (excelVal === 0 || excelVal === null || excelVal === undefined) ? '-' : (typeof excelVal === 'number' ? String(excelVal).replace(/\.0$/, '') : excelVal);
+                const cls = isSub ? ' class="subtotal-row"' : '';
+                const noteColor = v.note.includes('초과') || v.note.includes('불일치') ? '#c62828' : '#888';
+                return `<tr${cls}><td class="sub-cell">${sub}</td><td class="criteria-col" style="font-size:11px;">${critDisp||'-'}</td><td>${pdfDisp||'-'}</td><td>${ed}</td><td>${v.badge}</td><td style="font-size:11px;color:${noteColor};">${v.note}</td></tr>`;
             }
 
             let html = '';
 
-            // 1. 참여감리원 (50점)
-            html += row('1. 참여감리원', 50, '<b>가. 책임감리원</b>', '', '', {isText:true, rowspan: 12});
-            html += subRow('&nbsp;&nbsp;(1) 등급', p.책임_등급, e.책임_등급, {isText:true});
-            html += subRow('&nbsp;&nbsp;(2) 전기분야경력', p.책임_전기경력_점수, e.책임_전기경력_점수);
-            html += subRow('&nbsp;&nbsp;(3-1) 참여분야 경력', p.책임_배전경력1_점수, e.책임_참여분야1_점수);
-            html += subRow('&nbsp;&nbsp;(3-2) 참여분야 경력', p.책임_배전경력2_점수, e.책임_참여분야2_점수);
-            html += subRow('<b>나. 보조감리원</b>', '', '', {isText:true});
-            html += subRow('&nbsp;&nbsp;(1) 등급', p.보조1_성명 ? '-' : '-', e.보조1_등급, {isText:true});
-            html += subRow('&nbsp;&nbsp;(2) 전기분야경력 + 참여분야', '-', n(e.보조감리원_점수), {isText:true});
-            html += subRow('<b>다. 비상주감리원</b>', '', '', {isText:true});
-            html += subRow('&nbsp;&nbsp;(1) 등급', p.비상주_등급, e.비상주_등급, {isText:true});
-            html += subRow('&nbsp;&nbsp;(2) 전기분야 경력', '-', n(e.비상주_전기경력_점수), {isText:true});
-            html += subRow('소계', n(p.참여감리원_소계), n(e.참여감리원_소계), {isSubtotal:true, isText:true});
+            // ── 1. 참여감리원 (50점) ──
+            const cElec = e.책임_전기경력_점수 || 0;
+            const cF1   = e.책임_참여분야1_점수 || 0;
+            const cF2   = e.책임_참여분야2_점수 || 0;
+            const aElec = e.보조1_전기경력_점수 || 0;
+            const aF1   = e.보조1_참여분야1_점수 || 0;
+            const aF2   = e.보조1_참여분야2_점수 || 0;
+            const nGrade= e.비상주_등급_점수 || 0;
+            const nElec = e.비상주_전기경력_점수 || 0;
+            const partComputed = cElec+cF1+cF2 + aElec+aF1+aF2 + nGrade+nElec;
+            const partStated   = e.참여감리원_소계 || 0;
 
-            // 2. 유사용역 수행실적 (10점)
-            html += row('2. 유사용역<br>수행실적', 10, '감리업체 실적', p.유사용역_점수, e.유사용역_점수, {rowspan:1});
+            html += makeRow('1. 참여감리원', '50점', '<b>가. 책임감리원</b> (등급)', '-', p.책임_등급||'-', e.책임_등급||'-', vText(p.책임_등급, e.책임_등급), 12, false);
+            html += addRow('&nbsp;&nbsp;(2) 전기분야 경력', critFmt(cs.책임_전기경력_계산점수, p.책임_전기경력_점수, cs.책임_전기경력_근거), p.책임_전기경력_점수||'-', cElec, vMax(cElec, 10));
+            html += addRow('&nbsp;&nbsp;(3-1) 참여분야 경력', critFmt(cs.책임_배전경력1_계산점수, p.책임_배전경력1_점수, cs.책임_배전경력1_근거), p.책임_배전경력1_점수||'-', cF1, vMax(cF1, 10));
+            html += addRow('&nbsp;&nbsp;(3-2) 참여분야 경력(감독감리)', critFmt(cs.책임_배전경력2_계산점수, p.책임_배전경력2_점수, cs.책임_배전경력2_근거), p.책임_배전경력2_점수||'-', cF2, vMax(cF2, 5));
+            html += addRow('<b>나. 보조감리원</b> (등급)', '-', '-', e.보조1_등급||'-', vText('', e.보조1_등급));
+            html += addRow('&nbsp;&nbsp;(2) 전기분야 경력', '-', '-', aElec, vMax(aElec, 6));
+            html += addRow('&nbsp;&nbsp;(3-1) 참여분야 경력', '-', '-', aF1, vMax(aF1, 6));
+            html += addRow('&nbsp;&nbsp;(3-2) 참여분야 경력(감독감리)', '-', '-', aF2, vMax(aF2, 3));
+            html += addRow('<b>다. 비상주감리원</b> (등급)', critFmt(cs.비상주_등급_계산점수, nGrade, cs.비상주_등급_근거), p.비상주_등급||'-', e.비상주_등급||'-', vText(p.비상주_등급, e.비상주_등급));
+            html += addRow('&nbsp;&nbsp;(1) 등급 점수', '-', '-', nGrade, vMax(nGrade, 3));
+            html += addRow('&nbsp;&nbsp;(2) 전기분야 경력', '-', '-', nElec, vMax(nElec, 7));
+            html += addRow('소계', '-', n(p.참여감리원_소계), partStated, vSum(partComputed, partStated, 50), true);
 
-            // 4. 기술개발 및 투자실적 (10점) - 3.신용도 제외
-            html += row('3. 기술개발<br>및 투자실적', 10, '가. 개발실적', p.기술개발_점수 > 0 ? '-' : '-', e.개발실적_점수, {rowspan:4, isText:true});
-            html += subRow('나. 기술개발 투자실적', '-', n(e.기술투자_점수), {isText:true});
-            html += subRow('다. 교육실적', '-', n(e.교육실적_점수), {isText:true});
-            html += subRow('소계', n(p.기술개발_점수), n(e.기술개발_점수), {isSubtotal:true, isText:true});
+            // ── 2. 유사용역 (10점) ──
+            html += makeRow('2. 유사용역<br>수행실적', '10점', '감리업체 실적', critFmt(cs.유사용역_계산점수, p.유사용역_점수, cs.유사용역_근거), n(p.유사용역_점수), e.유사용역_점수||0, vMax(e.유사용역_점수||0, 10), 1, false);
 
-            // 5. 업무중첩도 (10점)
-            html += row('4. 업무중첩도', 10, '가. 상주감리원', '-', n(e.상주중첩_점수), {rowspan:3, isText:true});
-            html += subRow('나. 비상주감리원', '-', n(e.비상주중첩_점수), {isText:true});
-            html += subRow('소계', n(p.업무중첩_점수), n(e.업무중첩_점수), {isSubtotal:true, isText:true});
+            // ── 3. 기술개발 및 투자실적 (10점) ──
+            const td1 = e.개발실적_점수 || 0;
+            const td2 = e.기술투자_점수 || 0;
+            const td3 = e.교육실적_점수 || 0;
+            const tdComputed = td1 + td2 + td3;
+            const tdStated   = e.기술개발_점수 || 0;
+            // 기준 계산값: 세부증빙(양식2-9) 독립 추출
+            const csDevCalc = cs.개발실적_계산점수 != null
+                ? critFmt(cs.개발실적_계산점수, p.개발실적_점수||0, cs.개발실적_근거||'')
+                : '-';
+            const csInvCalc = cs.기술투자_계산점수 != null
+                ? critFmt(cs.기술투자_계산점수, p.기술투자_점수||0, cs.기술투자_근거||'')
+                : '-';
 
-            // 6. 교체빈도 (5점)
-            html += row('5. 교체빈도', 5, '가. 감리업체', '-', n(e.업체교체_점수), {rowspan:3, isText:true});
-            html += subRow('나. 참여감리원', '-', n(e.감리원교체_점수), {isText:true});
-            html += subRow('소계', n(p.교체빈도_점수), n(e.교체빈도_점수), {isSubtotal:true, isText:true});
+            html += makeRow('3. 기술개발<br>및 투자실적', '10점', '가. 개발실적', csDevCalc, n(p.개발실적_계산점수), td1, vMax(td1, 4), 4, false);
+            html += addRow('나. 기술개발 투자실적', csInvCalc, n(p.기술투자_계산점수), td2, vMax(td2, 4));
+            html += addRow('다. 교육실적', '-', n(p.교육실적_기재점수), td3, vMax(td3, 2));
+            html += addRow('소계', '-', n(p.기술개발_점수), tdStated, vSum(tdComputed, tdStated, 10), true);
 
-            // 7. 기타 (가/감점)
-            html += row('6. 기타<br>(가/감점)', '+1~-5', '가. 자격보유', p.가점_자격증, e.가점_자격증, {rowspan:2, tol:0.1});
-            html += subRow('나. 부실벌점', 0, e.부실벌점);
+            // ── 4. 업무중첩도 (10점) ──
+            const ov1 = e.상주중첩_점수 || 0;
+            const ov2 = e.비상주중첩_점수 || 0;
+            const ovComputed = ov1 + ov2;
+            const ovStated   = e.업무중첩_점수 || 0;
+            const csOv1 = cs.상주중첩_계산점수 != null
+                ? critFmt(cs.상주중첩_계산점수, p.상주중첩_기재점수||0, cs.상주중첩_근거||'')
+                : '-';
+            const csOv2 = cs.비상주중첩_계산점수 != null
+                ? critFmt(cs.비상주중첩_계산점수, p.비상주중첩_기재점수||0, cs.비상주중첩_근거||'')
+                : '-';
 
-            // 합계
-            const pdfTotal = (p.참여감리원_소계||0) + (p.유사용역_점수||0) + (p.기술개발_점수||0) +
-                             (p.업무중첩_점수||0) + (p.교체빈도_점수||0) + (p.가점_자격증||0);
-            const excelTotal = e.총점 || 0;
-            const totalCmp = cmpVal(pdfTotal, excelTotal, false, 1.0);
+            html += makeRow('4. 업무중첩도', '10점', '가. 상주감리원', csOv1, n(p.상주중첩_기재점수), ov1, vMax(ov1, 6), 3, false);
+            html += addRow('나. 비상주감리원', csOv2, n(p.비상주중첩_기재점수), ov2, vMax(ov2, 4));
+            { const v = vSum(ovComputed, ovStated, 10); if (keeaNote) v.note = keeaNote + (v.note ? ' ' + v.note : '');
+            html += addRow('소계', '-', n(p.업무중첩_점수), ovStated, v, true); }
+
+            // ── 5. 교체빈도 (5점) ──
+            const ch1 = e.업체교체_점수 || 0;
+            const ch2 = e.감리원교체_점수 || 0;
+            const chComputed = ch1 + ch2;
+            const chStated   = e.교체빈도_점수 || 0;
+
+            const csCh1 = cs.업체교체_계산점수 != null
+                ? critFmt(cs.업체교체_계산점수, p.업체교체_기재점수||0, cs.업체교체_근거||'')
+                : '-';
+            const csCh2 = cs.감리원교체_계산점수 != null
+                ? critFmt(cs.감리원교체_계산점수, p.감리원교체_기재점수||0, cs.감리원교체_근거||'')
+                : '-';
+
+            html += makeRow('5. 교체빈도', '5점', '가. 감리업체 교체', csCh1, n(p.업체교체_기재점수), ch1, vMax(ch1, 2.5), 3, false);
+            html += addRow('나. 참여감리원 교체', csCh2, n(p.감리원교체_기재점수), ch2, vMax(ch2, 2.5));
+            { const v = vSum(chComputed, chStated, 5); if (keeaNote) v.note = keeaNote + (v.note ? ' ' + v.note : '');
+            html += addRow('소계', '-', n(p.교체빈도_점수), chStated, v, true); }
+
+            // ── 6. 기타 가/감점 ──
+            const bonus = e.가점_자격증 || 0;
+            const penalty = e.부실벌점 || 0;
+            html += makeRow('6. 기타<br>(가/감점)', '+1~-5', '가. 자격보유 가점', critFmt(cs.가점_계산점수, p.가점_자격증, cs.가점_근거), n(p.가점_자격증), bonus, vMax(bonus, 1), 2, false);
+            html += addRow('나. 부실벌점 (감점)', '-', '-', penalty, { badge: BSkip, note: keeaNote });
+
+            // ── 합계 & 총점 검증 ──
+            const excelTotalComputed = partStated + (e.유사용역_점수||0) + tdStated + ovStated + chStated + bonus - penalty;
+            const excelTotalStated   = e.총점 || 0;
+            const totalV = vSum(excelTotalComputed, excelTotalStated, 100);
+            const pdfTotal = (p.참여감리원_소계||0) + (p.유사용역_점수||0) + (p.기술개발_점수||0) + (p.업무중첩_점수||0) + (p.교체빈도_점수||0) + (p.가점_자격증||0);
+
             html += `<tr class="total-row">
-                <td colspan="2" style="text-align:center;">합 계</td>
-                <td>85점</td>
+                <td colspan="2" style="text-align:center;font-weight:700;">합 계</td>
+                <td style="text-align:center;">85점</td>
+                <td>-</td>
                 <td>${n(pdfTotal)}</td>
-                <td>${n(excelTotal)}</td>
-                <td>${totalCmp.badge}</td>
-                <td style="font-size:11px;">${totalCmp.note}</td>
+                <td>${n(excelTotalStated)}</td>
+                <td>${totalV.badge}</td>
+                <td style="font-size:11px;color:${totalV.note?'#c62828':'#888'};">${totalV.note}</td>
             </tr>`;
 
-            // 적격여부
-            const pdfPf = data.verification ? data.verification.summary.pass_fail : '-';
-            const excelPf = excelTotal >= 80 ? '적격' : (excelTotal > 0 ? '실격' : '-');
-            const pfCmp = cmpVal(pdfPf, excelPf, true);
+            // ── 적격여부 ──
+            const excelPf = excelTotalStated >= 80 ? '적격' : (excelTotalStated > 0 ? '실격' : '-');
+            const pfColor = excelPf === '적격' ? '#27ae60' : '#e74c3c';
+            const calcPf  = excelTotalComputed >= 80 ? '적격' : '실격';
+            const calcNote = totalV.note ? `계산값: ${excelTotalComputed.toFixed(1)}점 → ${calcPf}` : '';
             html += `<tr class="result-row">
-                <td colspan="2" style="text-align:center; font-size:13px;">적격여부 (80점 이상)</td>
+                <td colspan="2" style="text-align:center;font-size:13px;font-weight:700;">적격여부 (80점 이상)</td>
                 <td></td>
-                <td style="color:${pdfPf==='적격'?'#27ae60':'#e74c3c'}; font-size:14px;">${pdfPf}</td>
-                <td style="color:${excelPf==='적격'?'#27ae60':'#e74c3c'}; font-size:14px;">${excelPf}</td>
-                <td>${pfCmp.badge}</td>
-                <td></td>
+                <td>-</td>
+                <td>-</td>
+                <td style="color:${pfColor};font-size:15px;font-weight:700;">${excelPf}</td>
+                <td>${excelPf !== '-' ? (excelPf==='적격'?BOk:BErr) : BSkip}</td>
+                <td style="font-size:11px;color:#c62828;">${calcNote}</td>
             </tr>`;
+
+            // ── KEEA 확인서 진위여부 ──
+            if (keea.length > 0) {
+                html += `<tr><td colspan="8" style="background:#e3f2fd;font-weight:700;padding:8px;font-size:13px;">
+                    KEEA 확인서 진위여부 (keea.or.kr 원본확인)</td></tr>`;
+                keea.forEach(c => {
+                    const ok = c.진위확인 === true;
+                    const badge = ok ? BOk : (c.진위확인 === false ? BErr : BWarn);
+                    const status = ok ? '확인됨' : (c.진위확인 === false ? '확인불가' : '조회실패');
+                    html += `<tr>
+                        <td colspan="2" style="text-align:center;">감리원 업무중첩도/교체빈도/부실벌점 확인서</td>
+                        <td>${c.성명 || '-'}</td>
+                        <td colspan="2" style="font-size:11px;">${c.발급번호}</td>
+                        <td style="text-align:center;">${status}</td>
+                        <td>${badge}</td>
+                        <td style="font-size:11px;">p${(c.page||0)+1}</td>
+                    </tr>`;
+                });
+            }
 
             document.getElementById('detailVerifyBody').innerHTML = html;
         }
