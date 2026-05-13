@@ -28,8 +28,7 @@ warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 
 from pq_extractor import (
     analyze_company, set_current_pdf, _get_cache_dir,
-    CHIEF_ELEC_CAREER_SCORE, CHIEF_FIELD_CAREER_SCORE_1,
-    CHIEF_FIELD_CAREER_SCORE_2, CERT_BONUS
+    CERT_BONUS, COST_TIER
 )
 
 app = Flask(__name__)
@@ -486,14 +485,59 @@ def cross_verify(pdf_data, excel_data):
         pdf_data.get("책임_배전경력2_점수", 0))
     items.append(item)
 
+    # 보조감리원 등급 (텍스트)
+    item = _compare_item("참여감리원", "보조감리원 등급",
+        pdf_data.get("보조_등급", ""), excel_data.get("보조1_등급", ""), severity="warning")
+    _add_criteria(item, None)
+    items.append(item)
+
+    # 보조감리원 전기분야 점수
+    item = _compare_numeric("참여감리원", "보조 전기분야 점수",
+        pdf_data.get("보조_전기경력_점수", 0), excel_data.get("보조1_전기경력_점수", 0),
+        tolerance=0.1, severity="error")
+    _add_criteria(item,
+        cs.get("보조_전기경력_계산점수"),
+        cs.get("보조_전기경력_근거", ""),
+        pdf_data.get("보조_전기경력_점수", 0))
+    items.append(item)
+
+    # 보조감리원 참여분야1 점수
+    item = _compare_numeric("참여감리원", "보조 참여분야1 점수",
+        pdf_data.get("보조_참여분야1_점수", 0), excel_data.get("보조1_참여분야1_점수", 0),
+        tolerance=0.1, severity="error")
+    _add_criteria(item,
+        cs.get("보조_참여1_계산점수"),
+        cs.get("보조_참여1_근거", ""),
+        pdf_data.get("보조_참여분야1_점수", 0))
+    items.append(item)
+
+    # 보조감리원 참여분야2 점수
+    item = _compare_numeric("참여감리원", "보조 참여분야2 점수",
+        pdf_data.get("보조_참여분야2_점수", 0), excel_data.get("보조1_참여분야2_점수", 0),
+        tolerance=0.1, severity="error")
+    _add_criteria(item,
+        cs.get("보조_참여2_계산점수"),
+        cs.get("보조_참여2_근거", ""),
+        pdf_data.get("보조_참여분야2_점수", 0))
+    items.append(item)
+
     # 비상주감리원 등급 — 기준계산값(등급→점수) 추가
     item = _compare_item("참여감리원", "비상주감리원 등급",
         pdf_data.get("비상주_등급", ""), excel_data.get("비상주_등급", ""), severity="error")
-    # 등급 비교이므로 criteria_value는 해당 등급에 대한 배점
     nonres_cv = cs.get("비상주_등급_계산점수")
     _add_criteria(item,
         f"{cs.get('비상주_등급_근거','')} → {nonres_cv}점" if nonres_cv is not None else None,
         cs.get("비상주_등급_근거", ""))
+    items.append(item)
+
+    # 비상주감리원 전기분야 점수
+    item = _compare_numeric("참여감리원", "비상주 전기분야 점수",
+        pdf_data.get("비상주_전기경력_점수", 0), excel_data.get("비상주_전기경력_점수", 0),
+        tolerance=0.1, severity="error")
+    _add_criteria(item,
+        cs.get("비상주_전기경력_계산점수"),
+        cs.get("비상주_전기경력_근거", ""),
+        pdf_data.get("비상주_전기경력_점수", 0))
     items.append(item)
 
     # 유사용역 점수 — 기준계산값 비교
@@ -527,6 +571,17 @@ def cross_verify(pdf_data, excel_data):
         cs.get("기술투자_근거", ""),
         pdf_data.get("기술투자_점수", 0),
         tolerance=0.5)
+    items.append(item)
+
+    # 기술개발 — 교육실적
+    item = _compare_numeric("기술개발", "다. 교육실적",
+        pdf_data.get("교육실적_기재점수", 0),
+        excel_data.get("교육실적_점수", 0), tolerance=0.5, severity="warning")
+    _add_criteria(item,
+        cs.get("교육실적_계산점수"),
+        cs.get("교육실적_근거", ""),
+        pdf_data.get("교육실적_기재점수", 0),
+        tolerance=0.1)
     items.append(item)
 
     # 업무중첩 — 가. 상주감리원
@@ -577,6 +632,16 @@ def cross_verify(pdf_data, excel_data):
         cs.get("가점_계산점수"),
         cs.get("가점_근거", ""),
         pdf_data.get("가점_자격증", 0))
+    items.append(item)
+
+    # 부실벌점
+    item = _compare_numeric("가점감점", "부실벌점",
+        0, excel_data.get("부실벌점", 0),
+        tolerance=0.1, severity="warning")
+    _add_criteria(item,
+        cs.get("부실벌점_계산점수"),
+        cs.get("부실벌점_근거", ""),
+        0, tolerance=0.1)
     items.append(item)
 
     # 총점 (신용도 제외)
@@ -777,6 +842,7 @@ def api_analyze():
     pdf_file = request.files.get('pdf_file')
     excel_file = request.files.get('excel_file')
     bidding_date = request.form.get('bidding_date', '2026-03-09')
+    cost_tier = request.form.get('cost_tier', '10억미만')
 
     if not pdf_file:
         return jsonify({"error": "PDF 파일을 업로드해주세요."}), 400
@@ -793,7 +859,7 @@ def api_analyze():
 
     try:
         # 1. PDF 분석
-        pdf_data = analyze_company(pdf_path, bidding_date)
+        pdf_data = analyze_company(pdf_path, bidding_date, cost_tier)
 
         # 2. Excel 파싱
         excel_data = {}

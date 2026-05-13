@@ -423,9 +423,110 @@
         .upload-divider::before { left: 0; }
         .upload-divider::after { right: 0; }
 
+        /* 헤더 버튼 */
+        .header-buttons {
+            margin-left: auto;
+            display: flex;
+            gap: 8px;
+        }
+        .header-btn {
+            background: rgba(255,255,255,0.15);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.3);
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+        .header-btn:hover {
+            background: rgba(255,255,255,0.25);
+            border-color: rgba(255,255,255,0.5);
+        }
+
+        /* 모달 */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-overlay.active { display: flex; }
+        .modal-box {
+            background: white;
+            border-radius: 12px;
+            max-width: 720px;
+            width: 90%;
+            max-height: 85vh;
+            overflow-y: auto;
+            padding: 28px 32px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+            position: relative;
+        }
+        .modal-box h2 {
+            font-size: 18px;
+            color: #1a3a5c;
+            margin-bottom: 16px;
+            border-bottom: 2px solid #e8ecf0;
+            padding-bottom: 10px;
+        }
+        .modal-box h3 {
+            font-size: 14px;
+            color: #1a3a5c;
+            margin: 16px 0 8px;
+        }
+        .modal-box p, .modal-box li {
+            font-size: 13px;
+            line-height: 1.7;
+            color: #444;
+        }
+        .modal-box ul, .modal-box ol {
+            padding-left: 20px;
+            margin-bottom: 10px;
+        }
+        .modal-box li { margin-bottom: 4px; }
+        .modal-box .info-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+            margin: 10px 0;
+        }
+        .modal-box .info-table th {
+            background: #e8ecf0;
+            padding: 6px 10px;
+            text-align: left;
+            font-weight: 600;
+            color: #1a3a5c;
+            border: 1px solid #ddd;
+        }
+        .modal-box .info-table td {
+            padding: 6px 10px;
+            border: 1px solid #ddd;
+        }
+        .modal-close {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            background: none;
+            border: none;
+            font-size: 22px;
+            color: #999;
+            cursor: pointer;
+            line-height: 1;
+            padding: 4px;
+        }
+        .modal-close:hover { color: #333; }
+
         @media (max-width: 768px) {
             .upload-grid { grid-template-columns: 1fr; }
             .summary-cards { grid-template-columns: repeat(2, 1fr); }
+            .header-buttons { gap: 4px; }
+            .header-btn { padding: 4px 8px; font-size: 11px; }
         }
     </style>
 </head>
@@ -436,6 +537,108 @@
             <div class="sub">한국전력공사 배전건설부 - 감리용역 적격심사</div>
         </div>
         <span class="badge">v1.0</span>
+        <div class="header-buttons">
+            <button class="header-btn" onclick="openModal('techModal')">기술요약</button>
+            <button class="header-btn" onclick="openModal('guideModal')">사용방법</button>
+        </div>
+    </div>
+
+    <!-- 기술요약 모달 -->
+    <div class="modal-overlay" id="techModal" onclick="closeModalOverlay(event)">
+        <div class="modal-box">
+            <button class="modal-close" onclick="closeModal('techModal')">&times;</button>
+            <h2>기술요약</h2>
+            <h3>시스템 개요</h3>
+            <p>본 시스템은 한국전력공사 배전건설부 감리용역 적격심사(PQ) 업무를 지원하기 위한 자동 교차검증 도구입니다.
+            업체가 제출한 PDF(사업수행능력 평가서)와 Excel(심사표)을 분석하여 점수를 독립적으로 재계산하고,
+            기재값과의 불일치를 자동으로 감지합니다.</p>
+
+            <h3>3방향 교차검증</h3>
+            <table class="info-table">
+                <tr><th>검증 소스</th><th>설명</th></tr>
+                <tr><td><b>기준 계산값</b></td><td>심사기준표를 적용하여 시스템이 독립적으로 산출한 점수</td></tr>
+                <tr><td><b>PDF 추출값</b></td><td>업체가 제출한 PDF에서 직접 추출한 기재 점수</td></tr>
+                <tr><td><b>Excel 제출값</b></td><td>업체가 제출한 심사 득점표(Excel)의 점수</td></tr>
+            </table>
+
+            <h3>평가 항목별 점수 체계</h3>
+            <table class="info-table">
+                <tr><th>항목</th><th>배점</th><th>세부 내용</th></tr>
+                <tr><td>1. 참여감리원</td><td>50점</td><td>책임/보조/비상주 감리원 등급, 전기분야 경력, 참여분야 경력</td></tr>
+                <tr><td>2. 유사용역 수행실적</td><td>10점</td><td>사정금액 대비 유사용역 수행 비율</td></tr>
+                <tr><td>3. 기술개발 및 투자실적</td><td>10점</td><td>개발실적(특허/실용신안/신기술), 투자실적, 교육실적</td></tr>
+                <tr><td>4. 업무중첩도</td><td>10점</td><td>타 용역과의 중복 여부 (상주/비상주)</td></tr>
+                <tr><td>5. 교체빈도</td><td>5점</td><td>감리업체/참여감리원 교체 빈도</td></tr>
+                <tr><td>6. 가점,감점</td><td>+1~-5</td><td>자격보유 가점, 부실벌점 감점</td></tr>
+            </table>
+
+            <h3>경력 점수 산정 방식</h3>
+            <ul>
+                <li><b>공사비 구간 + 등급 기반</b>: 책임감리원 참여분야 (총예정전기공사비와 감리원 등급에 따라 기준년수 결정)</li>
+                <li><b>공사비 구간만</b>: 전기분야 경력 (등급 무관, 공사비 구간으로 기준년수 결정)</li>
+                <li><b>고정 기준</b>: 보조감리원 참여분야 (5년 고정 기준, 공사비/등급 무관)</li>
+            </ul>
+
+            <h3>검증 결과 표시</h3>
+            <ul>
+                <li><b style="color:#2e7d32;">&#10003; 일치</b> : PDF 추출값과 Excel 제출값이 허용 오차 이내로 일치</li>
+                <li><b style="color:#e65100;">&#9888; 주의</b> : 경미한 차이 또는 확인 필요 항목</li>
+                <li><b style="color:#c62828;">&#10007; 불일치</b> : 기준 계산값 대비 기재값이 크게 상이하여 확인 필요</li>
+            </ul>
+        </div>
+    </div>
+
+    <!-- 사용방법 모달 -->
+    <div class="modal-overlay" id="guideModal" onclick="closeModalOverlay(event)">
+        <div class="modal-box">
+            <button class="modal-close" onclick="closeModal('guideModal')">&times;</button>
+            <h2>사용방법</h2>
+
+            <h3>1단계: 파일 업로드</h3>
+            <ol>
+                <li><b>폴더 선택 (권장)</b>: 업체별 PDF/Excel이 들어 있는 상위 폴더를 선택하면 자동으로 파일을 분류합니다.</li>
+                <li><b>개별 파일 선택</b>: PDF와 Excel 파일을 각각 직접 선택할 수도 있습니다. Ctrl+클릭으로 여러 파일을 선택할 수 있습니다.</li>
+            </ol>
+
+            <h3>2단계: 옵션 설정</h3>
+            <ul>
+                <li><b>입찰공고일</b>: 해당 공고의 입찰공고일을 설정합니다. 경력년수 산정의 기준일이 됩니다.</li>
+                <li><b>총예정전기공사비</b>: 공사비 구간을 선택합니다. 감리원 경력 점수 산정 기준년수에 영향을 줍니다.</li>
+            </ul>
+
+            <h3>3단계: 분석 실행</h3>
+            <ol>
+                <li><b>[분석 시작]</b> 버튼을 클릭합니다.</li>
+                <li>업체별로 PDF 파싱, 점수 추출, 기준 계산, Excel 비교가 순차적으로 진행됩니다.</li>
+                <li>진행 상태가 화면에 표시됩니다.</li>
+            </ol>
+
+            <h3>4단계: 결과 확인</h3>
+            <ul>
+                <li><b>요약 카드</b>: 전체 검증 결과 통계 (일치/불일치/경고 건수)</li>
+                <li><b>점수 현황</b>: 항목별 점수를 막대 그래프로 표시</li>
+                <li><b>교차검증 상세비교표</b>: 8열 테이블로 항목별 기준계산값, PDF추출값, Excel제출값을 비교</li>
+            </ul>
+
+            <h3>결과 해석</h3>
+            <table class="info-table">
+                <tr><th>컬럼</th><th>배경색</th><th>설명</th></tr>
+                <tr><td>기준 계산값</td><td style="background:#fafbe8;">노란색 배경</td><td>심사기준표에 따라 시스템이 독립 산출한 점수. 근거 정보가 함께 표시됩니다.</td></tr>
+                <tr><td>PDF 추출값</td><td>흰색</td><td>업체 제출 PDF에서 자동 추출한 기재 점수</td></tr>
+                <tr><td>Excel 제출값</td><td>흰색</td><td>업체 제출 Excel 득점표의 점수</td></tr>
+            </table>
+
+            <h3>복수 업체 분석</h3>
+            <p>여러 업체의 PDF/Excel을 동시에 업로드하면 업체별로 결과가 생성됩니다.
+            상세비교표 상단의 드롭다운에서 업체를 전환하여 각 업체의 결과를 확인할 수 있습니다.</p>
+
+            <h3>유의사항</h3>
+            <ul>
+                <li>PDF 파일은 텍스트 추출이 가능한 파일이어야 합니다 (스캔본은 일부 항목 추출 불가).</li>
+                <li>Excel 파일은 한전 PQ 심사서류 득점표 양식이어야 합니다.</li>
+                <li>기준 계산값과 기재값이 다르다고 반드시 오류는 아닙니다. 반드시 원본 서류를 확인하세요.</li>
+            </ul>
+        </div>
     </div>
 
     <div class="container">
@@ -478,9 +681,10 @@
                 <input type="date" id="biddingDate" value="2026-03-09">
                 <label>총예정전기공사비:</label>
                 <select id="costTier">
-                    <option value="10억이상">10억원 이상</option>
-                    <option value="5억이상10억미만" selected>10억원 미만 5억원 이상</option>
-                    <option value="5억미만">5억원 미만</option>
+                    <option value="100억이상">100억원 이상</option>
+                    <option value="50억이상">50억원~100억원 미만</option>
+                    <option value="10억이상">10억원~50억원 미만</option>
+                    <option value="10억미만" selected>10억원 미만</option>
                 </select>
             </div>
 
@@ -581,6 +785,22 @@
     </div>
 
     <script>
+        // 모달 열기/닫기
+        function openModal(id) {
+            document.getElementById(id).classList.add('active');
+            document.body.style.overflow = 'hidden';
+        }
+        function closeModal(id) {
+            document.getElementById(id).classList.remove('active');
+            document.body.style.overflow = '';
+        }
+        function closeModalOverlay(e) {
+            if (e.target === e.currentTarget) {
+                e.target.classList.remove('active');
+                document.body.style.overflow = '';
+            }
+        }
+
         // 폴더 업로드에서 분류된 파일
         window._folderPdfFiles = [];
         window._folderExcelFiles = [];
@@ -766,6 +986,7 @@
 
             const totalFiles = pdfFiles.length;
             const biddingDate = document.getElementById('biddingDate').value;
+            const costTier = document.getElementById('costTier').value;
             const allResults = [];
 
             for (let i = 0; i < totalFiles; i++) {
@@ -779,6 +1000,7 @@
                     formData.append('excel_file', matchedExcel);
                 }
                 formData.append('bidding_date', biddingDate);
+                formData.append('cost_tier', costTier);
                 formData.append('batch_index', i.toString());
 
                 try {
@@ -1039,13 +1261,13 @@
             html += addRow('&nbsp;&nbsp;(2) 전기분야 경력', critFmt(cs.책임_전기경력_계산점수, p.책임_전기경력_점수, cs.책임_전기경력_근거), p.책임_전기경력_점수||'-', cElec, vMax(cElec, 10));
             html += addRow('&nbsp;&nbsp;(3-1) 참여분야 경력', critFmt(cs.책임_배전경력1_계산점수, p.책임_배전경력1_점수, cs.책임_배전경력1_근거), p.책임_배전경력1_점수||'-', cF1, vMax(cF1, 10));
             html += addRow('&nbsp;&nbsp;(3-2) 참여분야 경력(감독감리)', critFmt(cs.책임_배전경력2_계산점수, p.책임_배전경력2_점수, cs.책임_배전경력2_근거), p.책임_배전경력2_점수||'-', cF2, vMax(cF2, 5));
-            html += addRow('<b>나. 보조감리원</b> (등급)', '-', '-', e.보조1_등급||'-', vText('', e.보조1_등급));
-            html += addRow('&nbsp;&nbsp;(2) 전기분야 경력', '-', '-', aElec, vMax(aElec, 6));
-            html += addRow('&nbsp;&nbsp;(3-1) 참여분야 경력', '-', '-', aF1, vMax(aF1, 6));
-            html += addRow('&nbsp;&nbsp;(3-2) 참여분야 경력(감독감리)', '-', '-', aF2, vMax(aF2, 3));
+            html += addRow('<b>나. 보조감리원</b> (등급)', '-', p.보조_등급||'-', e.보조1_등급||'-', vText(p.보조_등급, e.보조1_등급));
+            html += addRow('&nbsp;&nbsp;(2) 전기분야 경력', critFmt(cs.보조_전기경력_계산점수, p.보조_전기경력_점수, cs.보조_전기경력_근거), n(p.보조_전기경력_점수), aElec, vMax(aElec, 6));
+            html += addRow('&nbsp;&nbsp;(3-1) 참여분야 경력', critFmt(cs.보조_참여1_계산점수, p.보조_참여분야1_점수, cs.보조_참여1_근거), n(p.보조_참여분야1_점수), aF1, vMax(aF1, 6));
+            html += addRow('&nbsp;&nbsp;(3-2) 참여분야 경력(감독감리)', critFmt(cs.보조_참여2_계산점수, p.보조_참여분야2_점수, cs.보조_참여2_근거), n(p.보조_참여분야2_점수), aF2, vMax(aF2, 3));
             html += addRow('<b>다. 비상주감리원</b> (등급)', critFmt(cs.비상주_등급_계산점수, nGrade, cs.비상주_등급_근거), p.비상주_등급||'-', e.비상주_등급||'-', vText(p.비상주_등급, e.비상주_등급));
-            html += addRow('&nbsp;&nbsp;(1) 등급 점수', '-', '-', nGrade, vMax(nGrade, 3));
-            html += addRow('&nbsp;&nbsp;(2) 전기분야 경력', '-', '-', nElec, vMax(nElec, 7));
+            html += addRow('&nbsp;&nbsp;(1) 등급 점수', '-', n(p.비상주_등급_점수), nGrade, vMax(nGrade, 3));
+            html += addRow('&nbsp;&nbsp;(2) 전기분야 경력', critFmt(cs.비상주_전기경력_계산점수, p.비상주_전기경력_점수, cs.비상주_전기경력_근거), n(p.비상주_전기경력_점수), nElec, vMax(nElec, 7));
             html += addRow('소계', '-', n(p.참여감리원_소계), partStated, vSum(partComputed, partStated, 50), true);
 
             // ── 2. 유사용역 (10점) ──
@@ -1067,7 +1289,10 @@
 
             html += makeRow('3. 기술개발<br>및 투자실적', '10점', '가. 개발실적', csDevCalc, n(p.개발실적_계산점수), td1, vMax(td1, 4), 4, false);
             html += addRow('나. 기술개발 투자실적', csInvCalc, n(p.기술투자_계산점수), td2, vMax(td2, 4));
-            html += addRow('다. 교육실적', '-', n(p.교육실적_기재점수), td3, vMax(td3, 2));
+            const csEduCalc = cs.교육실적_계산점수 != null
+                ? critFmt(cs.교육실적_계산점수, p.교육실적_기재점수||0, cs.교육실적_근거||'')
+                : '-';
+            html += addRow('다. 교육실적', csEduCalc, n(p.교육실적_기재점수), td3, vMax(td3, 2));
             html += addRow('소계', '-', n(p.기술개발_점수), tdStated, vSum(tdComputed, tdStated, 10), true);
 
             // ── 4. 업무중첩도 (10점) ──
@@ -1109,7 +1334,10 @@
             const bonus = e.가점_자격증 || 0;
             const penalty = e.부실벌점 || 0;
             html += makeRow('6. 기타<br>(가/감점)', '+1~-5', '가. 자격보유 가점', critFmt(cs.가점_계산점수, p.가점_자격증, cs.가점_근거), n(p.가점_자격증), bonus, vMax(bonus, 1), 2, false);
-            html += addRow('나. 부실벌점 (감점)', '-', '-', penalty, { badge: BSkip, note: keeaNote });
+            const csPenalty = cs.부실벌점_계산점수 != null
+                ? critFmt(cs.부실벌점_계산점수, 0, cs.부실벌점_근거||'')
+                : '-';
+            html += addRow('나. 부실벌점 (감점)', csPenalty, '-', penalty, { badge: BSkip, note: keeaNote });
 
             // ── 합계 & 총점 검증 ──
             const excelTotalComputed = partStated + (e.유사용역_점수||0) + tdStated + ovStated + chStated + bonus - penalty;

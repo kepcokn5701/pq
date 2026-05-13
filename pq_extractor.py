@@ -31,29 +31,77 @@ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 BIDDING_DATE = "2026-03-09"  # 입찰공고일 (기본값)
 COST_TIER = "10억미만"  # 총 예정전기공사비 구간
 
-# 점수 기준표 (10억원 미만 구간 기준)
-# 책임감리원 전기분야 경력 점수표
-CHIEF_ELEC_CAREER_SCORE = {
-    # (등급, 경력연수): 점수
-    # 10억원 미만 구간
-    "특급": [(1, 4.0), (2, 5.5), (3, 7.0), (4, 8.5), (0, 10.0)],  # 1미만→4, 2이상→5.5, ...
-    "고급": [(2, 4.0), (3, 5.5), (4, 7.0), (5, 8.5), (0, 10.0)],
-    "중급": [(3, 4.0), (4, 5.5), (5, 7.0), (6, 8.5), (0, 10.0)],
+###############################################################################
+# 경력 점수 기준표 (공사비 구간 + 등급 기반)
+###############################################################################
+# 공사비 구간별 기본 경력년수 임계값 (만점 기준)
+# 100억이상→7, 50~100억→6, 10~50억→5, 10억미만→4
+COST_TIER_BASE = {"100억이상": 7, "50억이상": 6, "10억이상": 5, "10억미만": 4}
+
+# 등급별 경력년수 추가 오프셋 (등급이 낮을수록 더 많은 경력 필요)
+GRADE_OFFSET = {"특급": 0, "고급": 1, "중급": 2}
+
+# 각 항목의 점수 배분 (최고→최저, 5단계)
+# 전기분야: 등급 무관(공사비만), 참여분야/보조/비상주: 등급+공사비
+CAREER_SCORES = {
+    "책임_전기":    [10.0, 9.0, 8.0, 7.0, 6.0],    # 공사비만, 등급 무관
+    "책임_참여1":   [10.0, 8.5, 7.0, 5.5, 4.0],    # 공사비+등급
+    "책임_참여2":   [5.0, 4.5, 4.0, 3.5, 3.0],     # 공사비+등급 (감독/감리만)
+    "보조_전기":    [6.0, 5.5, 5.0, 4.5, 4.0],     # 공사비만, 등급 무관
+    "보조_참여1":   [6.0, 5.2, 4.4, 3.6],           # 고정기준(5년), 공사비/등급 무관
+    "보조_참여2":   [3.0, 2.8, 2.6, 2.4],           # 고정기준(5년), 공사비/등급 무관
+    "비상주_전기":  [7.0, 6.5, 6.0, 5.5, 5.0],     # 공사비만, 등급 무관
 }
 
-# 참여분야 경력 점수표 (나-1: 설계,시공,감리 등 전체)
-CHIEF_FIELD_CAREER_SCORE_1 = {
-    "특급": [(1, 4.0), (2, 5.5), (3, 7.0), (4, 8.5), (0, 10.0)],
-    "고급": [(2, 4.0), (3, 5.5), (4, 7.0), (5, 8.5), (0, 10.0)],
-    "중급": [(3, 4.0), (4, 5.5), (5, 7.0), (6, 8.5), (0, 10.0)],
-}
+# 등급이 없는(공사비만 적용) 항목 목록
+NO_GRADE_ITEMS = {"책임_전기", "보조_전기", "비상주_전기"}
 
-# 참여분야 경력 점수표 (나-2: 감독, 감리만)
-CHIEF_FIELD_CAREER_SCORE_2 = {
-    "특급": [(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (0, 5.0)],
-    "고급": [(2, 1.0), (3, 2.0), (4, 3.0), (5, 4.0), (0, 5.0)],
-    "중급": [(3, 1.0), (4, 2.0), (5, 3.0), (6, 4.0), (0, 5.0)],
-}
+# 공사비 구간과 무관하게 고정 base 사용하는 항목 (참여분야 고정 년수기준)
+FIXED_BASE_ITEMS = {"보조_참여1": 5, "보조_참여2": 5}
+
+
+def get_cost_base(cost_tier=None):
+    """총 예정전기공사비 구간 → 기본 임계값 반환"""
+    if cost_tier is None:
+        cost_tier = COST_TIER
+    return COST_TIER_BASE.get(cost_tier, 4)
+
+
+def calc_career_score(years, item_key, grade="", cost_tier=None):
+    """경력년수로 점수 계산 (범용)
+
+    Args:
+        years: 경력 년수 (float, 1년미만 절사)
+        item_key: CAREER_SCORES 키 (예: "책임_전기", "책임_참여1")
+        grade: 등급 ("특급"/"고급"/"중급"), 등급무관 항목은 무시됨
+        cost_tier: 공사비 구간 (None이면 전역 COST_TIER 사용)
+
+    Returns:
+        (점수, 근거문자열)
+    """
+    scores = CAREER_SCORES.get(item_key)
+    if not scores:
+        return 0.0, ""
+
+    y = int(years)  # 1년미만 절사
+
+    # 고정 base 항목은 공사비/등급 무관
+    if item_key in FIXED_BASE_ITEMS:
+        base = FIXED_BASE_ITEMS[item_key]
+    else:
+        base = get_cost_base(cost_tier)
+        # 등급 오프셋 적용 (전기분야는 등급 무관)
+        if item_key not in NO_GRADE_ITEMS:
+            base += GRADE_OFFSET.get(grade, 2)
+
+    show_grade = grade and item_key not in NO_GRADE_ITEMS and item_key not in FIXED_BASE_ITEMS
+    prefix = f"{grade} " if show_grade else ""
+
+    for i, score in enumerate(scores):
+        if y >= base - i:
+            return score, f"{prefix}{years:.1f}년→{score}점"
+
+    return scores[-1], f"{prefix}{years:.1f}년→{scores[-1]}점"
 
 # 자본비율 점수표
 CAPITAL_RATIO_SCORE = [
@@ -86,6 +134,17 @@ CERT_BONUS = {
     "기사": 0.7,
     "산업기사": 0.5,
 }
+
+# 부실벌점 감점표 (누계평균부실벌점 → 감점, 공고일 2개월전 최근2년)
+PENALTY_DEDUCTION_SCORE = [
+    (20, -5.0),   # 20점 이상
+    (15, -3.0),   # 15~20점 미만
+    (10, -2.0),   # 10~15점 미만
+    (5,  -1.0),   # 5~10점 미만
+    (2,  -0.5),   # 2~5점 미만
+    (1,  -0.2),   # 1~2점 미만
+    (0,   0.0),   # 1점 미만
+]
 
 # 유사용역 점수표 (사정금액 대비 비율 → 점수)
 SIMILAR_PROJECT_SCORE = [
@@ -569,6 +628,139 @@ def extract_career_summary(doc):
                         career["책임_참여분야2_점수"] = score
 
     return career
+
+
+def extract_asst_career(doc, chief_page):
+    """보조감리원 경력실적사항(양식2-5 보조) 추출"""
+    result = {
+        "보조_전기분야_년": 0, "보조_전기분야_점수": 0,
+        "보조_참여분야1_년": 0, "보조_참여분야1_점수": 0,
+        "보조_참여분야2_년": 0, "보조_참여분야2_점수": 0,
+        "보조_등급": "",
+        "page": -1,
+    }
+
+    # 책임감리원 페이지 이후에서 '보조감리원' 또는 '보조' 포함 양식2-5 탐색
+    start = max(chief_page, 17)
+    page_num = smart_find_page(doc, ['양식2-5', '보조감리원'],
+                                range(start, min(start + 15, doc.page_count)), "보조감리원경력")
+    if page_num < 0:
+        page_num = smart_find_page(doc, ['보조감리원', '전기분야', '경력'],
+                                    range(start, min(start + 15, doc.page_count)), "보조감리원경력(확장)")
+    if page_num < 0:
+        return result
+
+    result["page"] = page_num + 1
+    lines = get_page_lines(doc, page_num)
+
+    # 경력 개월수 추출
+    section = None
+    for line in lines:
+        if '가.' in line and '전기분야' in line:
+            section = "전기"
+        elif '나-1' in line or ('나.' in line and '참여분야' in line and '감독' not in line and '감리' not in line):
+            section = "참여1"
+        elif '나-2' in line or ('참여분야' in line and ('감독' in line or '감리' in line)):
+            section = "참여2"
+
+        m = re.search(r'(\d+\.?\d*)\s*개월', line)
+        if m:
+            months = float(m.group(1))
+            years = round(months / 12, 2)
+            if section == "전기" and result["보조_전기분야_년"] == 0:
+                result["보조_전기분야_년"] = years
+            elif section == "참여1" and result["보조_참여분야1_년"] == 0:
+                result["보조_참여분야1_년"] = years
+            elif section == "참여2" and result["보조_참여분야2_년"] == 0:
+                result["보조_참여분야2_년"] = years
+            elif result["보조_전기분야_년"] == 0:
+                result["보조_전기분야_년"] = years
+
+    # 점수 추출
+    for line in lines:
+        m = re.search(r'(\d+\.?\d*)\s*점', line)
+        if m:
+            score = float(m.group(1))
+            if '라' in line or ('전기분야' in line and '참여' not in line):
+                if score <= 6:
+                    result["보조_전기분야_점수"] = score
+            elif '마-1' in line or ('참여분야' in line and '감독' not in line):
+                if score <= 6:
+                    result["보조_참여분야1_점수"] = score
+            elif '마-2' in line or ('참여분야' in line and ('감독' in line or '감리' in line)):
+                if score <= 3:
+                    result["보조_참여분야2_점수"] = score
+            else:
+                if result["보조_전기분야_점수"] == 0 and score <= 6:
+                    result["보조_전기분야_점수"] = score
+                elif result["보조_참여분야1_점수"] == 0 and score <= 6:
+                    result["보조_참여분야1_점수"] = score
+                elif result["보조_참여분야2_점수"] == 0 and score <= 3:
+                    result["보조_참여분야2_점수"] = score
+
+    # 등급 추출
+    grades = ['특급', '고급', '중급', '초급']
+    for line in lines:
+        for g in grades:
+            if g == line.strip():
+                result["보조_등급"] = g
+                break
+
+    print(f"  [보조감리원경력] p{page_num+1}: 전기={result['보조_전기분야_점수']}점, "
+          f"참여1={result['보조_참여분야1_점수']}점, 참여2={result['보조_참여분야2_점수']}점")
+    return result
+
+
+def extract_nonres_career(doc, chief_page):
+    """비상주감리원 경력실적사항(양식2-5 비상주) 추출"""
+    result = {
+        "비상주_전기분야_년": 0, "비상주_전기분야_점수": 0,
+        "비상주_등급_점수": 0,
+        "page": -1,
+    }
+
+    start = max(chief_page, 17)
+    page_num = smart_find_page(doc, ['양식2-5', '비상주감리원'],
+                                range(start, min(start + 20, doc.page_count)), "비상주감리원경력")
+    if page_num < 0:
+        page_num = smart_find_page(doc, ['비상주감리원', '전기분야', '경력'],
+                                    range(start, min(start + 20, doc.page_count)), "비상주감리원경력(확장)")
+    if page_num < 0:
+        return result
+
+    result["page"] = page_num + 1
+    lines = get_page_lines(doc, page_num)
+
+    # 등급 점수: "특급" 또는 "고급" → 3점/2점
+    for line in lines:
+        if '등' in line and '급' in line:
+            for i2, l2 in enumerate(lines):
+                if l2.strip() in ('특급', '고급'):
+                    result["비상주_등급_점수"] = 3.0 if l2.strip() == '특급' else 2.0
+                    break
+            break
+
+    # 전기분야 경력 개월수
+    for line in lines:
+        m = re.search(r'(\d+\.?\d*)\s*개월', line)
+        if m:
+            months = float(m.group(1))
+            result["비상주_전기분야_년"] = round(months / 12, 2)
+            break
+
+    # 전기분야 점수
+    for line in lines:
+        if ('다' in line or '전기분야' in line) and '점' in line:
+            m = re.search(r'(\d+\.?\d*)\s*점', line)
+            if m:
+                score = float(m.group(1))
+                if score <= 7:
+                    result["비상주_전기분야_점수"] = score
+                    break
+
+    print(f"  [비상주감리원경력] p{page_num+1}: 등급점수={result['비상주_등급_점수']}점, "
+          f"전기={result['비상주_전기분야_점수']}점")
+    return result
 
 
 def extract_similar_project(doc):
@@ -1326,35 +1518,63 @@ def calculate_scores_by_criteria(pdf_data):
     }
     """
     calc = {}
+    cost_tier = pdf_data.get("cost_tier", COST_TIER)
 
+    # ── 1. 책임감리원 ──
     grade = pdf_data.get("책임_등급", "")
 
-    # 1. 책임감리원 전기분야 경력 점수
+    # 1-1. 전기분야 경력 (등급 무관, 공사비만)
     elec_years = pdf_data.get("책임_전기경력_년", 0) or 0
-    if grade in CHIEF_ELEC_CAREER_SCORE:
-        calc["책임_전기경력_계산점수"] = lookup_career_score(grade, elec_years, CHIEF_ELEC_CAREER_SCORE)
-        calc["책임_전기경력_근거"] = f"{grade} {elec_years:.1f}년"
+    s, b = calc_career_score(elec_years, "책임_전기", cost_tier=cost_tier)
+    calc["책임_전기경력_계산점수"] = s
+    calc["책임_전기경력_근거"] = b
 
-    # 2. 책임감리원 참여분야 경력1 점수 (설계·시공·감리 등 전체)
+    # 1-2. 참여분야 경력1 (설계·시공·감리 등 전체)
     field1_years = pdf_data.get("책임_배전경력1_년", 0) or 0
-    if grade in CHIEF_FIELD_CAREER_SCORE_1:
-        calc["책임_배전경력1_계산점수"] = lookup_career_score(grade, field1_years, CHIEF_FIELD_CAREER_SCORE_1)
-        calc["책임_배전경력1_근거"] = f"{grade} {field1_years:.1f}년"
+    s, b = calc_career_score(field1_years, "책임_참여1", grade, cost_tier)
+    calc["책임_배전경력1_계산점수"] = s
+    calc["책임_배전경력1_근거"] = b
 
-    # 3. 책임감리원 참여분야 경력2 점수 (감독·감리만)
+    # 1-3. 참여분야 경력2 (감독·감리만)
     field2_years = pdf_data.get("책임_배전경력2_년", 0) or 0
-    if grade in CHIEF_FIELD_CAREER_SCORE_2:
-        calc["책임_배전경력2_계산점수"] = lookup_career_score(grade, field2_years, CHIEF_FIELD_CAREER_SCORE_2)
-        calc["책임_배전경력2_근거"] = f"{grade} {field2_years:.1f}년 (감독/감리만)"
+    s, b = calc_career_score(field2_years, "책임_참여2", grade, cost_tier)
+    calc["책임_배전경력2_계산점수"] = s
+    calc["책임_배전경력2_근거"] = b
 
-    # 4. 비상주감리원 등급 점수
+    # ── 2. 보조감리원 ──
+    asst_grade = pdf_data.get("보조_등급", "")
+    asst_elec_years = pdf_data.get("보조_전기경력_년", 0) or 0
+    if asst_elec_years > 0 or pdf_data.get("보조_전기경력_점수", 0) > 0:
+        s, b = calc_career_score(asst_elec_years, "보조_전기", asst_grade, cost_tier)
+        calc["보조_전기경력_계산점수"] = s
+        calc["보조_전기경력_근거"] = b
+
+        asst_f1_years = pdf_data.get("보조_참여분야1_년", 0) or asst_elec_years
+        s, b = calc_career_score(asst_f1_years, "보조_참여1", asst_grade, cost_tier)
+        calc["보조_참여1_계산점수"] = s
+        calc["보조_참여1_근거"] = b
+
+        asst_f2_years = pdf_data.get("보조_참여분야2_년", 0) or asst_elec_years
+        s, b = calc_career_score(asst_f2_years, "보조_참여2", asst_grade, cost_tier)
+        calc["보조_참여2_계산점수"] = s
+        calc["보조_참여2_근거"] = b
+
+    # ── 3. 비상주감리원 ──
     nonres_grade = pdf_data.get("비상주_등급", "")
+    # 등급 점수
     if nonres_grade in NONRESIDENT_GRADE_SCORE:
         calc["비상주_등급_계산점수"] = NONRESIDENT_GRADE_SCORE[nonres_grade]
         calc["비상주_등급_근거"] = nonres_grade
     elif nonres_grade:
         calc["비상주_등급_계산점수"] = 0.0
         calc["비상주_등급_근거"] = f"{nonres_grade} (고급 미만→실격)"
+
+    # 전기분야 경력
+    nonres_elec_years = pdf_data.get("비상주_전기경력_년", 0) or 0
+    if nonres_elec_years > 0 or pdf_data.get("비상주_전기경력_점수", 0) > 0:
+        s, b = calc_career_score(nonres_elec_years, "비상주_전기", nonres_grade, cost_tier)
+        calc["비상주_전기경력_계산점수"] = s
+        calc["비상주_전기경력_근거"] = b
 
     # 5. 유사용역 점수 (사정금액 대비 비율 기반)
     ratio = pdf_data.get("유사용역_비율", 0) or 0
@@ -1379,6 +1599,15 @@ def calculate_scores_by_criteria(pdf_data):
     if dev_calc is not None and dev_cnt > 0:
         calc["개발실적_계산점수"] = dev_calc
         calc["개발실적_근거"] = f"{dev_cnt}건 합산(max4점)"
+
+    # 8-1. 교육실적 (최근3년 전기공사감리 교육훈련 이수 시 2점)
+    edu_score = pdf_data.get("교육실적_기재점수", 0)
+    if edu_score > 0:
+        calc["교육실적_계산점수"] = 2.0
+        calc["교육실적_근거"] = "교육이수→2점"
+    else:
+        calc["교육실적_계산점수"] = 0.0
+        calc["교육실적_근거"] = "교육미이수→0점"
 
     # 9. 상주감리원 중첩도
     overlap_raw = pdf_data.get("overlap_raw", {})
@@ -1408,6 +1637,17 @@ def calculate_scores_by_criteria(pdf_data):
         calc["감리원교체_계산점수"] = score
         calc["감리원교체_근거"] = f"상주{상주}건/비상주{비상주}건→{score}점"
 
+    # 13. 부실벌점 (누계평균부실벌점 기준, KEEA 해당없음→감점0)
+    penalty_avg = pdf_data.get("부실벌점_누계평균", None)
+    keea_certs = pdf_data.get("keea_certs", [])
+    if penalty_avg is not None and penalty_avg > 0:
+        deduction = lookup_score(penalty_avg, PENALTY_DEDUCTION_SCORE)
+        calc["부실벌점_계산점수"] = deduction
+        calc["부실벌점_근거"] = f"누계평균{penalty_avg}점→{deduction}점"
+    elif keea_certs:
+        calc["부실벌점_계산점수"] = 0.0
+        calc["부실벌점_근거"] = "KEEA확인서 해당없음→감점0"
+
     return calc
 
 
@@ -1415,7 +1655,7 @@ def calculate_scores_by_criteria(pdf_data):
 # 메인 분석 함수
 ###############################################################################
 
-def analyze_company(pdf_path, bidding_date=BIDDING_DATE):
+def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
     """업체 PQ 제출 PDF 전체 분석"""
     print(f"\n{'='*60}")
     print(f"  배전감리 PQ 심사 데이터 추출")
@@ -1461,6 +1701,12 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE):
     print(f"  → 전기분야: {career['책임_전기분야_년']}년 → {career['책임_전기분야_점수']}점")
     print(f"  → 참여분야(전체): {career['책임_참여분야1_년']}년 → {career['책임_참여분야1_점수']}점")
     print(f"  → 참여분야(감독감리): {career['책임_참여분야2_년']}년 → {career['책임_참여분야2_점수']}점")
+
+    # 4.5 보조감리원/비상주감리원 경력 추출
+    print("[4.5/5] 보조/비상주감리원 경력 추출 중...")
+    chief_page = career["page"] - 1 if career["page"] > 0 else 17
+    asst_career = extract_asst_career(doc, chief_page)
+    nonres_career = extract_nonres_career(doc, chief_page)
 
     # 5. 유사용역 실적 추출
     print("[5/5] 유사용역 수행실적 추출 중...")
@@ -1521,8 +1767,16 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE):
         "책임_배전경력2_년": career["책임_참여분야2_년"],
         "책임_배전경력2_점수": career["책임_참여분야2_점수"],
         "보조1_성명": personnel["보조감리원"][0]["성명"] if personnel["보조감리원"] else "",
+        "보조_등급": asst_career["보조_등급"] or (personnel["보조감리원"][0]["등급"] if personnel["보조감리원"] else ""),
+        "보조_전기경력_년": asst_career["보조_전기분야_년"],
+        "보조_전기경력_점수": asst_career["보조_전기분야_점수"],
+        "보조_참여분야1_점수": asst_career["보조_참여분야1_점수"],
+        "보조_참여분야2_점수": asst_career["보조_참여분야2_점수"],
         "비상주_성명": personnel["비상주감리원"]["성명"],
         "비상주_등급": personnel["비상주감리원"]["등급"],
+        "비상주_등급_점수": nonres_career["비상주_등급_점수"],
+        "비상주_전기경력_년": nonres_career["비상주_전기분야_년"],
+        "비상주_전기경력_점수": nonres_career["비상주_전기분야_점수"],
         "유사용역_적용금액": similar["적용금액"],
         "유사용역_비율": similar.get("비율", 0),
         "유사용역_점수": summary["유사용역"],
@@ -1556,6 +1810,8 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE):
         "replacement_raw": replacement,
         # KEEA 확인서 발급번호
         "keea_certs": keea_certs,
+        # 공사비 구간
+        "cost_tier": cost_tier,
         # 근거 페이지
         "근거페이지": {
             "종합득점표": summary["page"],
