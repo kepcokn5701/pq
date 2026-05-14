@@ -536,7 +536,7 @@
             <h1>배전감리 PQ 심사 교차검증 시스템</h1>
             <div class="sub">한국전력공사 배전건설부 - 감리용역 적격심사</div>
         </div>
-        <span class="badge">v1.0</span>
+        <span class="badge" title="서버 시작: {{ server_time }}">{{ server_time }}</span>
         <div class="header-buttons">
             <button class="header-btn" onclick="openModal('techModal')">기술요약</button>
             <button class="header-btn" onclick="openModal('guideModal')">사용방법</button>
@@ -574,7 +574,7 @@
 
             <h3>경력 점수 산정 방식</h3>
             <ul>
-                <li><b>공사비 구간 + 등급 기반</b>: 책임감리원 참여분야 (총예정전기공사비와 감리원 등급에 따라 기준년수 결정)</li>
+                <li><b>공사비 구간 + 등급 기반</b>: 책임감리원 참여분야 (총 예정전기공사비와 감리원 등급에 따라 기준년수 결정)</li>
                 <li><b>공사비 구간만</b>: 전기분야 경력 (등급 무관, 공사비 구간으로 기준년수 결정)</li>
                 <li><b>고정 기준</b>: 보조감리원 참여분야 (5년 고정 기준, 공사비/등급 무관)</li>
             </ul>
@@ -603,7 +603,7 @@
             <h3>2단계: 옵션 설정</h3>
             <ul>
                 <li><b>입찰공고일</b>: 해당 공고의 입찰공고일을 설정합니다. 경력년수 산정의 기준일이 됩니다.</li>
-                <li><b>총예정전기공사비</b>: 공사비 구간을 선택합니다. 감리원 경력 점수 산정 기준년수에 영향을 줍니다.</li>
+                <li><b>총 예정전기공사비</b>: 공사비 구간을 선택합니다. 감리원 경력 점수 산정 기준년수에 영향을 줍니다.</li>
             </ul>
 
             <h3>3단계: 분석 실행</h3>
@@ -679,7 +679,7 @@
             <div class="options-row">
                 <label>입찰공고일:</label>
                 <input type="date" id="biddingDate" value="2026-03-09">
-                <label>총예정전기공사비:</label>
+                <label>총 예정전기공사비:</label>
                 <select id="costTier">
                     <option value="100억이상">100억원 이상</option>
                     <option value="50억이상">50억원~100억원 미만</option>
@@ -877,6 +877,11 @@
                 // 임시파일(~$로 시작) 제외
                 if (f.name.startsWith('~$')) return;
                 if (name.endsWith('.pdf')) {
+                    // 작업계획및기법 PDF 제외
+                    if (name.includes('작업계획') || name.includes('작업기법') || name.includes('첨부')) {
+                        skipFiles.push(f);
+                        return;
+                    }
                     pdfFiles.push(f);
                 } else if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
                     excelFiles.push(f);

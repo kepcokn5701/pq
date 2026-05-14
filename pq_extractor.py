@@ -375,6 +375,396 @@ def smart_find_page(doc, keywords, search_range, label=""):
     return -1
 
 
+def classify_pages(doc):
+    """전체 페이지를 스캔하여 양식별로 분류 → 페이지 맵 반환
+
+    Returns: {"양식2-4": [16], "양식2-5_책임": [20], ...}
+    """
+    page_map = {}
+    # 우선순위 순서: 고유 식별자가 있는 양식 먼저 매칭
+    FORM_RULES = [
+        ("양식2-3", [["종합득점표"], ["양식2-3"]]),
+        ("양식2-4", [["양식2-4"], ["참여감리원", "자격사항", "자격등급"]]),
+        ("양식2-5_책임", [["양식2-5", "1. 책임감리원"], ["양식2-5", "책임감리원"]]),
+        ("양식2-5_보조", [["양식2-5", "2. 보조감리원"], ["양식2-5", "보조감리원"]]),
+        ("양식2-5_비상주", [["3. 비상주감리원"], ["양식2-5", "비상주감리원"]]),
+        ("양식2-6", [["유사용역", "환산금액"], ["양식2-6"]]),
+        ("양식2-9", [["양식2-9"], ["기술개발투자실적"]]),
+        ("양식2-10", [["양식2-10"], ["업무중첩도", "배치현황"]]),
+        ("양식2-11", [["양식2-11", "교체빈도"]]),
+    ]
+    for pn in range(doc.page_count):
+        text = doc[pn].get_text()
+        if not text.strip():
+            continue
+        for form_id, keyword_sets in FORM_RULES:
+            if any(all(kw in text for kw in kws) for kws in keyword_sets):
+                page_map.setdefault(form_id, []).append(pn)
+                break
+    return page_map
+
+
+# ── find_tables 헬퍼 함수 ──
+
+_NAME_FILTER = {'책임감리원', '보조감리원', '비상주', '감리원', '전기', '토목',
+                '특급', '고급', '중급', '초급', '소계', '합계', '배점', '평점',
+                '자격사항', '자격내용', '자격등급', '참여감리원', '학력내용',
+                '소속회사', '생년월일', '비상주감리원', '전기분야', '참여분야',
+                '교육수료', '종료일자', '최종학력', '취득일', '자격명'}
+
+_NAME_EXCLUDE_KW = ['감리', '기술', '분야', '비고', '양식', '교육', '재직', '증명',
+                    '사본', '추가', '확인', '발급', '등본', '경우', '첨부', '상주',
+                    '법인', '협회', '시행', '건설', '경력', '학위', '자격', '평가',
+                    '공사', '용역', '시행']
+
+
+def _extract_name_from_cells(row):
+    """테이블 행에서 한글 이름(2~4자) 추출 — 공백 포함 이름 대응 ('윤 민' 등)"""
+    for cell in row:
+        if cell is None:
+            continue
+        val = cell.strip()
+        # 1) 연속 한글 2~4자
+        m = re.search(r'(?<![가-힣])([가-힣]{2,4})(?![가-힣])', val)
+        if m:
+            name = m.group(1)
+            if name not in _NAME_FILTER and not any(kw in name for kw in _NAME_EXCLUDE_KW):
+                return name
+        # 2) 공백 포함 한글 이름 ('윤 민', '이 수 진' 등)
+        m2 = re.search(r'(?<![가-힣])([가-힣]\s+[가-힣]{1,3})(?![가-힣])', val)
+        if m2:
+            name = m2.group(1).replace(' ', '')
+            if len(name) >= 2 and name not in _NAME_FILTER and not any(kw in name for kw in _NAME_EXCLUDE_KW):
+                return name
+    return ""
+
+
+def _extract_grade_from_cells(row):
+    """테이블 행에서 등급(특급/고급/중급/초급) 추출"""
+    for cell in row:
+        if cell is None:
+            continue
+        for g in ('특급', '고급', '중급', '초급'):
+            if g in cell:
+                return g
+    return ""
+
+
+def _extract_date_from_cells(row):
+    """테이블 행에서 생년월일(YYYY-MM-DD) 추출"""
+    for cell in row:
+        if cell is None:
+            continue
+        m = re.search(r'(\d{4}-\d{2}-\d{2})', cell)
+        if m:
+            year = int(m.group(1)[:4])
+            if 1940 < year < 2000:
+                return m.group(1)
+    return ""
+
+
+def _extract_cert_from_cells(row):
+    """테이블 행에서 자격증명 추출"""
+    for cell in row:
+        if cell is None:
+            continue
+        m = re.search(r'(전기[가-힣]*기[사술장]|[가-힣]*기[사술장])', cell)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def extract_personnel_v2(doc, page_map):
+    """양식2-4 find_tables() 기반 인력 추출 — 업체별 양식 차이 자동 대응
+
+    Variant A (성문): 역할 행 + 다음 행에 이름 (cell[0]=None, cell[1]=이름)
+    Variant B (로운/다은): 역할 + 이름 같은 행 (cell[0]=역할, cell[1]=이름)
+
+    Returns: personnel dict 또는 None (find_tables 실패 시)
+    """
+    personnel = {
+        "책임감리원": {"성명": "", "등급": "", "자격증": "", "생년월일": ""},
+        "보조감리원": [],
+        "비상주감리원": {"성명": "", "등급": "", "자격증": "", "생년월일": ""},
+        "page": -1,
+    }
+
+    pages = page_map.get("양식2-4", [])
+    if not pages:
+        return None
+
+    page_num = pages[0]
+    personnel["page"] = page_num + 1
+    page = doc[page_num]
+
+    tables = page.find_tables()
+    if not tables.tables:
+        return None
+
+    rows = tables.tables[0].extract()
+    if len(rows) < 4 or len(rows[0]) < 10:
+        return None
+
+    current_role = None
+    bozo_person = None  # 현재 보조감리원 dict 참조
+
+    for i in range(2, len(rows)):  # 헤더 2행 skip
+        row = rows[i]
+        cell0 = (row[0] or '').strip().replace('\n', ' ')
+
+        # 역할 감지
+        new_role = None
+        if '책임감리원' in cell0:
+            new_role = '책임'
+        elif '보조감리원' in cell0 or cell0 == '보조':
+            new_role = '보조'
+        elif '비상주' in cell0:
+            new_role = '비상주'
+
+        if new_role:
+            current_role = new_role
+            if new_role == '보조':
+                bozo_person = {"성명": "", "등급": "", "경력일수": ""}
+                personnel["보조감리원"].append(bozo_person)
+
+        if current_role is None:
+            continue
+
+        # 행에서 데이터 추출
+        name = _extract_name_from_cells(row)
+        grade = _extract_grade_from_cells(row)
+        birth = _extract_date_from_cells(row)
+        cert = _extract_cert_from_cells(row)
+
+        if current_role == '책임':
+            p = personnel["책임감리원"]
+            if name and not p["성명"]:
+                p["성명"] = name
+            if grade and not p["등급"]:
+                p["등급"] = grade
+            if birth and not p["생년월일"]:
+                p["생년월일"] = birth
+            if cert and not p["자격증"]:
+                p["자격증"] = cert
+        elif current_role == '보조' and bozo_person:
+            if name and not bozo_person["성명"]:
+                bozo_person["성명"] = name
+            if grade and not bozo_person["등급"]:
+                bozo_person["등급"] = grade
+        elif current_role == '비상주':
+            p = personnel["비상주감리원"]
+            if name and not p["성명"]:
+                p["성명"] = name
+            if grade and not p["등급"]:
+                p["등급"] = grade
+            if birth and not p["생년월일"]:
+                p["생년월일"] = birth
+            if cert and not p["자격증"]:
+                p["자격증"] = cert
+
+    # 검증: 최소한 책임감리원 이름+등급이 있어야 유효
+    if not personnel["책임감리원"]["성명"] or not personnel["책임감리원"]["등급"]:
+        return None
+
+    print(f"    [v2] 책임: {personnel['책임감리원']['성명']}/{personnel['책임감리원']['등급']}, "
+          f"보조: {personnel['보조감리원'][0]['성명'] if personnel['보조감리원'] else '-'}/"
+          f"{personnel['보조감리원'][0]['등급'] if personnel['보조감리원'] else '-'}, "
+          f"비상주: {personnel['비상주감리원']['성명']}/{personnel['비상주감리원']['등급']}")
+
+    return personnel
+
+
+def extract_career_v2(doc, page_map, role="책임"):
+    """양식2-5 경력 추출 통합 — find_tables() + get_text() 하이브리드
+
+    role: "책임"|"보조"|"비상주"
+    Returns: 기존 함수와 동일한 dict 형식 또는 None (실패 시)
+    """
+    if role == "책임":
+        result = {
+            "책임_전기분야_개월": 0, "책임_전기분야_년": 0,
+            "책임_참여분야1_개월": 0, "책임_참여분야1_년": 0,
+            "책임_참여분야2_개월": 0, "책임_참여분야2_년": 0,
+            "책임_전기분야_점수": 0, "책임_참여분야1_점수": 0, "책임_참여분야2_점수": 0,
+            "page": -1,
+        }
+        page_key = "양식2-5_책임"
+        prefix = "책임"
+        score_limits = {"전기": 10, "참여1": 10, "참여2": 5}
+    elif role == "보조":
+        result = {
+            "보조_전기분야_년": 0, "보조_전기분야_점수": 0,
+            "보조_참여분야1_년": 0, "보조_참여분야1_점수": 0,
+            "보조_참여분야2_년": 0, "보조_참여분야2_점수": 0,
+            "보조_등급": "",
+            "page": -1,
+        }
+        page_key = "양식2-5_보조"
+        prefix = "보조"
+        score_limits = {"전기": 6, "참여1": 6, "참여2": 3}
+    elif role == "비상주":
+        result = {
+            "비상주_전기분야_년": 0, "비상주_전기분야_점수": 0,
+            "비상주_등급_점수": 0,
+            "page": -1,
+        }
+        page_key = "양식2-5_비상주"
+        prefix = "비상주"
+        score_limits = {"전기": 7}
+    else:
+        return None
+
+    pages = page_map.get(page_key, [])
+    if not pages:
+        return None
+
+    # 첫 번째 페이지를 기본으로, 다중 페이지면 계 행이 있는 페이지 찾기
+    result["page"] = pages[0] + 1
+
+    # ── 1단계: find_tables() → 경력 개월수 추출 (계 행) ──
+    sum_found = False
+    for pn in pages:
+        page = doc[pn]
+        tables = page.find_tables()
+        if not tables.tables:
+            continue
+        for t in tables.tables:
+            rows = t.extract()
+            for row in rows:
+                if (row[0] or '').strip() == '계':
+                    ncols = len(row)
+                    if role in ("책임", "보조") and ncols >= 10:
+                        try:
+                            elec = float((row[4] or '0').replace(',', ''))
+                            result[f"{prefix}_전기분야_년"] = round(elec / 12, 2)
+                            if role == "책임":
+                                result["책임_전기분야_개월"] = elec
+                        except (ValueError, TypeError):
+                            pass
+                        try:
+                            p1 = float((row[6] or '0').replace(',', ''))
+                            result[f"{prefix}_참여분야1_년"] = round(p1 / 12, 2)
+                            if role == "책임":
+                                result["책임_참여분야1_개월"] = p1
+                        except (ValueError, TypeError):
+                            pass
+                        try:
+                            p2 = float((row[9] or '0').replace(',', ''))
+                            result[f"{prefix}_참여분야2_년"] = round(p2 / 12, 2)
+                            if role == "책임":
+                                result["책임_참여분야2_개월"] = p2
+                        except (ValueError, TypeError):
+                            pass
+                        sum_found = True
+                    elif role == "비상주" and ncols >= 7:
+                        try:
+                            elec = float((row[6] or '0').replace(',', ''))
+                            result["비상주_전기분야_년"] = round(elec / 12, 2)
+                        except (ValueError, TypeError):
+                            pass
+                        sum_found = True
+                    break
+            if sum_found:
+                break
+        if sum_found:
+            break
+
+    # ── 2단계: get_text() → 점수/등급 추출 (첫 번째 페이지 상단) ──
+    text = doc[pages[0]].get_text()
+    lines = [l.strip() for l in text.split('\n')]
+
+    if role in ("책임", "보조"):
+        # 점수: 라. 전기분야 / 마-1. 참여분야 / 마-2. 참여분야
+        score_section = None
+        for i, line in enumerate(lines):
+            if '라' in line and '전기분야' in line:
+                score_section = "전기"
+                continue
+            elif '마-2' in line:
+                score_section = "참여2"
+                continue
+            elif '마-1' in line or ('마' in line and '참여분야' in line and '마-2' not in line):
+                score_section = "참여1"
+                continue
+
+            if score_section is None:
+                continue
+
+            score = None
+            m = re.search(r'(\d+\.?\d*)\s*점', line)
+            if m:
+                score = float(m.group(1))
+            elif re.match(r'^\d+\.?\d*$', line):
+                # 숫자만 있는 줄 → 다음 비어있지 않은 줄에 '점'이 있는지 확인
+                for j in range(i + 1, min(i + 3, len(lines))):
+                    if lines[j]:
+                        if '점' in lines[j]:
+                            score = float(line)
+                        break
+
+            if score is not None:
+                max_s = score_limits.get(score_section, 99)
+                if score_section == "전기":
+                    key = f"{prefix}_전기분야_점수"
+                elif score_section == "참여1":
+                    key = f"{prefix}_참여분야1_점수"
+                else:
+                    key = f"{prefix}_참여분야2_점수"
+
+                if result.get(key, 0) == 0 and score <= max_s:
+                    result[key] = score
+
+        # 보조 등급 추출
+        if role == "보조":
+            for line in lines:
+                if line in ('특급', '고급', '중급', '초급'):
+                    result["보조_등급"] = line
+                    break
+
+    elif role == "비상주":
+        # 등급 점수: 특급→3, 고급→2
+        for line in lines:
+            if line in ('특급', '고급'):
+                result["비상주_등급_점수"] = 3.0 if line == '특급' else 2.0
+                break
+
+        # 전기분야 점수: "다. 전기분야" 또는 "나. 전기분야" 아래
+        score_section = None
+        for i, line in enumerate(lines):
+            if ('다' in line or '나' in line) and '전기분야' in line:
+                score_section = "전기"
+                continue
+            if score_section == "전기":
+                m = re.search(r'(\d+\.?\d*)\s*점', line)
+                if m:
+                    score = float(m.group(1))
+                    if score <= 7:
+                        result["비상주_전기분야_점수"] = score
+                        break
+                elif re.match(r'^\d+\.?\d*$', line):
+                    # 숫자만 있는 줄 → 다음 비어있지 않은 줄에 '점'이 있는지 확인
+                    maybe_score = float(line)
+                    for j in range(i + 1, min(i + 3, len(lines))):
+                        if lines[j]:
+                            if '점' in lines[j] and maybe_score <= 7:
+                                result["비상주_전기분야_점수"] = maybe_score
+                            break
+                    if result["비상주_전기분야_점수"] > 0:
+                        break
+
+    if not sum_found:
+        return None  # 테이블에서 계 행을 못 찾으면 실패
+
+    print(f"    [v2-{role}] p{result['page']}: ", end="")
+    if role in ("책임", "보조"):
+        print(f"전기={result[f'{prefix}_전기분야_년']}년/{result[f'{prefix}_전기분야_점수']}점, "
+              f"참여1={result[f'{prefix}_참여분야1_점수']}점, 참여2={result[f'{prefix}_참여분야2_점수']}점")
+    elif role == "비상주":
+        print(f"등급={result['비상주_등급_점수']}점, 전기={result['비상주_전기분야_년']}년/{result['비상주_전기분야_점수']}점")
+
+    return result
+
+
 def extract_company_name(doc):
     """업체명 추출 (PyMuPDF 텍스트 우선)"""
     for page_num in range(min(5, doc.page_count)):
@@ -516,18 +906,45 @@ def extract_personnel(doc):
             if asst_line >= 0 and line_num >= asst_line:
                 personnel["보조감리원"].append({"성명": name, "등급": "", "경력일수": ""})
 
-        # 4단계: 등급 - 순서 기반 (테이블 열 순서: 1=책임, 2=비상주, 3=보조)
+        # 4단계: 등급 - 섹션 마커 근접도 기반 할당
         all_grades = []
         for i, line in enumerate(lines):
             for grade in grades:
-                if grade == line.strip():  # 등급만 있는 줄
+                if grade == line.strip():
                     all_grades.append((i, grade))
-        if len(all_grades) >= 1:
-            personnel["책임감리원"]["등급"] = all_grades[0][1]
-        if len(all_grades) >= 2:
-            personnel["비상주감리원"]["등급"] = all_grades[1][1]
-        if len(all_grades) >= 3 and personnel["보조감리원"]:
-            personnel["보조감리원"][0]["등급"] = all_grades[2][1]
+
+        # 각 등급을 가장 가까운 섹션 마커에 할당
+        markers = []
+        if chief_line >= 0:
+            markers.append(("책임", chief_line))
+        if asst_line >= 0:
+            markers.append(("보조", asst_line))
+        if nonres_line >= 0:
+            markers.append(("비상주", nonres_line))
+
+        assigned_grades = {}
+        used = set()
+        # 각 마커에 대해 가장 가까운 미할당 등급 찾기
+        for section, marker_pos in sorted(markers, key=lambda x: x[1]):
+            best_idx = -1
+            best_dist = float('inf')
+            for gi, (gpos, gval) in enumerate(all_grades):
+                if gi in used:
+                    continue
+                dist = abs(gpos - marker_pos)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = gi
+            if best_idx >= 0:
+                assigned_grades[section] = all_grades[best_idx][1]
+                used.add(best_idx)
+
+        if "책임" in assigned_grades:
+            personnel["책임감리원"]["등급"] = assigned_grades["책임"]
+        if "비상주" in assigned_grades:
+            personnel["비상주감리원"]["등급"] = assigned_grades["비상주"]
+        if "보조" in assigned_grades and personnel["보조감리원"]:
+            personnel["보조감리원"][0]["등급"] = assigned_grades["보조"]
 
         # 5단계: 자격증/생년월일 추출
         for i, line in enumerate(lines):
@@ -640,8 +1057,8 @@ def extract_asst_career(doc, chief_page):
         "page": -1,
     }
 
-    # 책임감리원 페이지 이후에서 '보조감리원' 또는 '보조' 포함 양식2-5 탐색
-    start = max(chief_page, 17)
+    # 책임감리원 페이지 다음부터 '보조감리원' 포함 양식2-5 탐색
+    start = max(chief_page + 1, 17)
     page_num = smart_find_page(doc, ['양식2-5', '보조감리원'],
                                 range(start, min(start + 15, doc.page_count)), "보조감리원경력")
     if page_num < 0:
@@ -676,27 +1093,39 @@ def extract_asst_career(doc, chief_page):
             elif result["보조_전기분야_년"] == 0:
                 result["보조_전기분야_년"] = years
 
-    # 점수 추출
-    for line in lines:
+    # 점수 추출 — 섹션 추적 + 점수/점 분리 라인 처리
+    score_section = None
+    for i, line in enumerate(lines):
+        # 섹션 헤더 감지 (마-2를 마-1보다 먼저 체크)
+        if '라' in line and '전기분야' in line:
+            score_section = "전기"
+            continue
+        elif '마-2' in line or ('참여분야' in line and ('감독' in line or '감리' in line)):
+            score_section = "참여2"
+            continue
+        elif '마-1' in line or ('마' in line and '참여분야' in line):
+            score_section = "참여1"
+            continue
+
+        if score_section is None:
+            continue
+
+        score = None
+        # 같은 라인: "6 점" 또는 "6.0 점"
         m = re.search(r'(\d+\.?\d*)\s*점', line)
         if m:
             score = float(m.group(1))
-            if '라' in line or ('전기분야' in line and '참여' not in line):
-                if score <= 6:
-                    result["보조_전기분야_점수"] = score
-            elif '마-1' in line or ('참여분야' in line and '감독' not in line):
-                if score <= 6:
-                    result["보조_참여분야1_점수"] = score
-            elif '마-2' in line or ('참여분야' in line and ('감독' in line or '감리' in line)):
-                if score <= 3:
-                    result["보조_참여분야2_점수"] = score
-            else:
-                if result["보조_전기분야_점수"] == 0 and score <= 6:
-                    result["보조_전기분야_점수"] = score
-                elif result["보조_참여분야1_점수"] == 0 and score <= 6:
-                    result["보조_참여분야1_점수"] = score
-                elif result["보조_참여분야2_점수"] == 0 and score <= 3:
-                    result["보조_참여분야2_점수"] = score
+        # 분리 라인: "6.0" 다음 줄이 "점"
+        elif re.match(r'^\d+\.?\d*$', line) and i + 1 < len(lines) and '점' in lines[i + 1]:
+            score = float(line)
+
+        if score is not None:
+            if score_section == "전기" and result["보조_전기분야_점수"] == 0 and score <= 6:
+                result["보조_전기분야_점수"] = score
+            elif score_section == "참여1" and result["보조_참여분야1_점수"] == 0 and score <= 6:
+                result["보조_참여분야1_점수"] = score
+            elif score_section == "참여2" and result["보조_참여분야2_점수"] == 0 and score <= 3:
+                result["보조_참여분야2_점수"] = score
 
     # 등급 추출
     grades = ['특급', '고급', '중급', '초급']
@@ -719,41 +1148,55 @@ def extract_nonres_career(doc, chief_page):
         "page": -1,
     }
 
-    start = max(chief_page, 17)
-    page_num = smart_find_page(doc, ['양식2-5', '비상주감리원'],
-                                range(start, min(start + 20, doc.page_count)), "비상주감리원경력")
-    if page_num < 0:
-        page_num = smart_find_page(doc, ['비상주감리원', '전기분야', '경력'],
-                                    range(start, min(start + 20, doc.page_count)), "비상주감리원경력(확장)")
+    # 책임감리원 페이지 다음부터 탐색, '비상주감리원' 섹션 헤더가 있는 페이지 찾기
+    start = max(chief_page + 1, 17)
+    page_num = -1
+    for pn in range(start, min(start + 25, doc.page_count)):
+        if pn >= doc.page_count:
+            break
+        text = doc[pn].get_text()
+        # '비상주감리원'이 섹션 헤더로 존재하는 페이지 (설명 텍스트 내 '비상주' 제외)
+        if '비상주감리원' in text and ('등' in text and '급' in text or '전기분야' in text):
+            # 책임/보조 페이지가 아닌지 확인
+            if '1. 책임감리원' not in text and '2. 보조감리원' not in text:
+                page_num = pn
+                print(f"    [비상주감리원경력] 페이지 {pn+1}에서 발견")
+                break
     if page_num < 0:
         return result
 
     result["page"] = page_num + 1
     lines = get_page_lines(doc, page_num)
 
-    # 등급 점수: "특급" 또는 "고급" → 3점/2점
+    # 등급 점수: "특급" → 3점, "고급" → 2점
     for line in lines:
-        if '등' in line and '급' in line:
-            for i2, l2 in enumerate(lines):
-                if l2.strip() in ('특급', '고급'):
-                    result["비상주_등급_점수"] = 3.0 if l2.strip() == '특급' else 2.0
-                    break
+        if line.strip() in ('특급', '고급'):
+            result["비상주_등급_점수"] = 3.0 if line.strip() == '특급' else 2.0
             break
 
-    # 전기분야 경력 개월수
-    for line in lines:
+    # 전기분야 경력 개월수 (합계 개월)
+    for i, line in enumerate(lines):
         m = re.search(r'(\d+\.?\d*)\s*개월', line)
         if m:
             months = float(m.group(1))
             result["비상주_전기분야_년"] = round(months / 12, 2)
             break
 
-    # 전기분야 점수
-    for line in lines:
-        if ('다' in line or '전기분야' in line) and '점' in line:
+    # 전기분야 점수 — 같은 라인 또는 분리 라인 처리
+    score_section = None
+    for i, line in enumerate(lines):
+        if ('다' in line or '나' in line) and '전기분야' in line:
+            score_section = "전기"
+            continue
+        if score_section == "전기":
             m = re.search(r'(\d+\.?\d*)\s*점', line)
             if m:
                 score = float(m.group(1))
+                if score <= 7:
+                    result["비상주_전기분야_점수"] = score
+                    break
+            elif re.match(r'^\d+\.?\d*$', line) and i + 1 < len(lines) and '점' in lines[i + 1]:
+                score = float(line)
                 if score <= 7:
                     result["비상주_전기분야_점수"] = score
                     break
@@ -775,7 +1218,7 @@ def extract_similar_project(doc):
 
     # 유사용역 시작 페이지 찾기
     start_page = smart_find_page(doc, ['유사용역실적', '유사용역', '환산금액'],
-                                range(25, min(40, doc.page_count)), "유사용역")
+                                range(20, min(int(doc.page_count * 0.5), doc.page_count)), "유사용역")
 
     if start_page >= 0:
         result["page"] = start_page + 1
@@ -860,10 +1303,10 @@ def extract_financial(doc):
 
     # 재정상태 페이지 찾기 (공사감리용역수행현황확인서)
     page_num = smart_find_page(doc, ['자기자본비율', '유동비율', '수행현황확인서'],
-                                range(30, min(50, doc.page_count)), "재정상태")
+                                range(25, min(int(doc.page_count * 0.5), doc.page_count)), "재정상태")
     if page_num < 0:
         page_num = smart_find_page(doc, ['자기자본', '유동비율'],
-                                    range(25, min(60, doc.page_count)), "재정상태(확장)")
+                                    range(20, min(int(doc.page_count * 0.6), doc.page_count)), "재정상태(확장)")
 
     if page_num >= 0:
         result["page"] = page_num + 1
@@ -963,8 +1406,9 @@ def extract_tech_development(doc, bidding_date=BIDDING_DATE):
         bid_dt = datetime.now()
 
     # 페이지 탐색: 양식2-9 또는 기술개발투자실적 키워드
+    tech_start = max(int(doc.page_count * 0.5), 40)
     page_num = smart_find_page(doc, ['양식2-9', '기술개발투자실적', '개발실적'],
-                                range(70, min(100, doc.page_count)), "기술개발")
+                                range(tech_start, doc.page_count), "기술개발")
     if page_num < 0:
         return result
 
@@ -1174,8 +1618,9 @@ def extract_overlap(doc):
         "page": -1,
     }
 
+    overlap_start = max(int(doc.page_count * 0.55), 40)
     page_num = smart_find_page(doc, ['양식2-10', '업무중첩도', '배치현황'],
-                                range(110, min(135, doc.page_count)), "업무중첩도")
+                                range(overlap_start, doc.page_count), "업무중첩도")
     if page_num < 0:
         return result
 
@@ -1235,8 +1680,9 @@ def extract_replacement(doc):
         "page": -1,
     }
 
+    repl_start = max(int(doc.page_count * 0.6), 50)
     page_num = smart_find_page(doc, ['양식2-11', '교체빈도율', '배치감리원수'],
-                                range(118, min(135, doc.page_count)), "교체빈도")
+                                range(repl_start, doc.page_count), "교체빈도")
     if page_num < 0:
         return result
 
@@ -1320,9 +1766,10 @@ def extract_keea_certificates(doc):
     name_pat = re.compile(r'^[가-힣]{2,4}$')
 
     # 양식2-11(교체빈도) 직후 ~ +8페이지 범위에서 탐색
-    start = smart_find_page(doc, ['양식2-11', '교체빈도율'], range(118, min(135, doc.page_count)))
+    search_start = max(int(doc.page_count * 0.6), 50)
+    start = smart_find_page(doc, ['양식2-11', '교체빈도율'], range(search_start, doc.page_count))
     if start < 0:
-        start = 120
+        start = doc.page_count - 15
     search_range = range(start + 1, min(start + 9, doc.page_count))
 
     reader = get_reader()
@@ -1399,10 +1846,10 @@ def extract_sanctions(doc):
 
     # 제재내역은 보통 재정상태와 같은 페이지 또는 근처
     page_num = smart_find_page(doc, ['제재내역', '영업정지', '이하여백'],
-                                range(33, min(50, doc.page_count)), "제재내역")
+                                range(25, min(int(doc.page_count * 0.5), doc.page_count)), "제재내역")
     if page_num < 0:
         page_num = smart_find_page(doc, ['제재', '영업정지', '벌점'],
-                                    range(25, min(60, doc.page_count)), "제재내역(확장)")
+                                    range(20, min(int(doc.page_count * 0.6), doc.page_count)), "제재내역(확장)")
 
     if page_num >= 0:
         result["page"] = page_num + 1
@@ -1687,9 +2134,16 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
     print(f"  → 교체빈도: {summary['교체빈도']}점, 가감점: {summary['가감점']}점")
     print(f"  → 업체제출 총점: {summary['총점']}")
 
+    # 2.5 페이지 분류 (find_tables 기반 추출용)
+    page_map = classify_pages(doc)
+    print(f"  → 페이지 분류: {', '.join(f'{k}:p{v[0]+1}' for k,v in page_map.items() if v)}")
+
     # 3. 참여감리원 자격사항 추출
     print("[3/5] 참여감리원 자격사항 추출 중...")
-    personnel = extract_personnel(doc)
+    personnel = extract_personnel_v2(doc, page_map)
+    if personnel is None:
+        print("  → [v2 실패] 기존 방식으로 폴백")
+        personnel = extract_personnel(doc)
     print(f"  → 책임감리원: {personnel['책임감리원']['성명']} / {personnel['책임감리원']['등급']}")
     if personnel["보조감리원"]:
         print(f"  → 보조감리원: {personnel['보조감리원'][0]['성명']}")
@@ -1697,16 +2151,24 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
 
     # 4. 책임감리원 경력 추출
     print("[4/5] 책임감리원 경력 추출 중...")
-    career = extract_career_summary(doc)
+    career = extract_career_v2(doc, page_map, "책임")
+    if career is None:
+        print("  → [v2 실패] 기존 방식으로 폴백")
+        career = extract_career_summary(doc)
     print(f"  → 전기분야: {career['책임_전기분야_년']}년 → {career['책임_전기분야_점수']}점")
     print(f"  → 참여분야(전체): {career['책임_참여분야1_년']}년 → {career['책임_참여분야1_점수']}점")
     print(f"  → 참여분야(감독감리): {career['책임_참여분야2_년']}년 → {career['책임_참여분야2_점수']}점")
 
     # 4.5 보조감리원/비상주감리원 경력 추출
     print("[4.5/5] 보조/비상주감리원 경력 추출 중...")
-    chief_page = career["page"] - 1 if career["page"] > 0 else 17
-    asst_career = extract_asst_career(doc, chief_page)
-    nonres_career = extract_nonres_career(doc, chief_page)
+    asst_career = extract_career_v2(doc, page_map, "보조")
+    if asst_career is None:
+        chief_page = career["page"] - 1 if career["page"] > 0 else 17
+        asst_career = extract_asst_career(doc, chief_page)
+    nonres_career = extract_career_v2(doc, page_map, "비상주")
+    if nonres_career is None:
+        chief_page = career["page"] - 1 if career["page"] > 0 else 17
+        nonres_career = extract_nonres_career(doc, chief_page)
 
     # 5. 유사용역 실적 추출
     print("[5/5] 유사용역 수행실적 추출 중...")

@@ -36,6 +36,9 @@ app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200MB
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
+# 서버 시작 시간
+SERVER_START_TIME = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
 # 최근 분석 결과 저장 (세션 대용)
 _last_result = {}
 _batch_results = []  # 일괄 분석 결과 (여러 업체)
@@ -826,7 +829,7 @@ def handle_exception(e):
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return render_template('index.html', server_time=SERVER_START_TIME)
 
 
 @app.route('/api/analyze', methods=['POST'])
