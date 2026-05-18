@@ -1383,13 +1383,14 @@
                     const ok = c.진위확인 === true;
                     const badge = ok ? BOk : (c.진위확인 === false ? BErr : BWarn);
                     const status = ok ? '확인됨' : (c.진위확인 === false ? '확인불가' : '조회실패');
+                    const keeaNote2 = c.진위확인 === false ? '담당자 검토필요' : '';
                     html += `<tr>
                         <td colspan="2" style="text-align:center;">감리원 업무중첩도/교체빈도/부실벌점 확인서</td>
                         <td>${c.성명 || '-'}</td>
                         <td colspan="2" style="font-size:11px;">${c.발급번호}</td>
                         <td style="text-align:center;">${status}</td>
                         <td>${badge}</td>
-                        <td style="font-size:11px;">p${(c.page||0)+1}</td>
+                        <td style="font-size:11px;">${keeaNote2 ? '<span style="color:#c62828;">' + keeaNote2 + '</span> ' : ''}p${(c.page||0)+1}</td>
                     </tr>`;
                 });
             }

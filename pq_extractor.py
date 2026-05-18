@@ -404,6 +404,307 @@ def classify_pages(doc):
     return page_map
 
 
+# ── 스캔 PDF 대응: OCR 기반 페이지 탐색 + 인력 추출 ──
+
+def classify_pages_ocr(doc, reader):
+    """스캔 PDF 전체 페이지를 OCR로 분류 → 페이지 맵 반환
+
+    페이지 상단 20%만 OCR하여 양식 번호를 빠르게 탐색.
+    Returns: {"양식2-4": [38, 39, ...], "양식2-9": [80], ...}
+    """
+    page_map = {}
+    FORM_RULES = [
+        ("양식2-3", [["종합득점표"], ["양식2-3"]]),
+        ("양식2-4", [["양식2-4"], ["참여감리원", "자격사항"]]),
+        ("양식2-5_책임", [["양식2-5", "책임감리원"]]),
+        ("양식2-5_보조", [["양식2-5", "보조감리원"]]),
+        ("양식2-5_비상주", [["비상주감리원"], ["양식2-5", "비상주"]]),
+        ("양식2-6", [["유사용역", "환산"], ["양식2-6"]]),
+        ("양식2-9", [["양식2-9"], ["기술개발투자실적"], ["기술개발", "투자실적"]]),
+        ("양식2-10", [["양식2-10"], ["업무중첩도", "배치"]]),
+        ("양식2-11", [["양식2-11", "교체빈도"]]),
+    ]
+
+    for pn in range(doc.page_count):
+        # 내장 텍스트가 있으면 건너뜀 (이미 classify_pages()로 처리됨)
+        if len(doc[pn].get_text().strip()) > 100:
+            continue
+
+        page = doc[pn]
+        rect = page.rect
+        # 상단 25%만 크롭하여 OCR → 속도 최적화
+        clip = fitz.Rect(rect.x0, rect.y0, rect.x1, rect.y0 + rect.height * 0.25)
+        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), clip=clip)
+        img_data = pix.tobytes('png')
+        results = reader.readtext(img_data, batch_size=1)
+        header_text = ' '.join([t for _, t, _ in results])
+        del img_data, pix
+
+        for form_id, keyword_sets in FORM_RULES:
+            if any(all(kw in header_text for kw in kws) for kws in keyword_sets):
+                page_map.setdefault(form_id, []).append(pn)
+                break
+
+    if page_map:
+        print(f"    [OCR page_map] {page_map}")
+    return page_map
+
+
+def smart_find_page_with_ocr(doc, reader, keywords, search_range, label=""):
+    """스캔 PDF에서 키워드로 페이지 탐색 — OCR 사용
+
+    페이지 상단 25%만 OCR하여 빠르게 탐색.
+    Returns: page_num (0-indexed) or -1
+    """
+    for page_num in search_range:
+        if page_num >= doc.page_count:
+            break
+        if len(doc[page_num].get_text().strip()) > 100:
+            continue
+
+        page = doc[page_num]
+        rect = page.rect
+        clip = fitz.Rect(rect.x0, rect.y0, rect.x1, rect.y0 + rect.height * 0.25)
+        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), clip=clip)
+        img_data = pix.tobytes('png')
+        results = reader.readtext(img_data, batch_size=1)
+        header_text = ' '.join([t for _, t, _ in results])
+        del img_data, pix
+
+        if any(kw in header_text for kw in keywords):
+            if label:
+                print(f"    [{label}] 페이지 {page_num+1}에서 발견 (OCR)")
+            return page_num
+    return -1
+
+
+def _find_personnel_page_ocr(doc, reader):
+    """스캔 PDF에서 참여감리원 상세 페이지를 OCR로 탐색
+
+    1차: 양식2-4 제목 키워드로 탐색
+    2차: 역할+등급+경력 조합으로 탐색 (폴백)
+    Returns: page_num (0-indexed) or -1
+    """
+    import re as _re
+
+    # 1차: 양식2-4 제목으로 탐색 (상단 OCR)
+    pn = smart_find_page_with_ocr(doc, reader, ['양식2-4'], range(0, min(80, doc.page_count)), '양식2-4')
+    if pn >= 0:
+        return pn
+
+    # 2차: 역할+등급+경력 조합 (평가서 표지 포함)
+    grade_pat = _re.compile(r'(특급|고급|중급|초급)')
+
+    for pn in range(0, min(50, doc.page_count)):
+        if len(doc[pn].get_text().strip()) > 100:
+            continue
+
+        page = doc[pn]
+        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+        img_data = pix.tobytes('png')
+        results = reader.readtext(img_data, batch_size=1)
+        all_text = ' '.join([t for _, t, _ in results])
+        del img_data, pix
+
+        grades = grade_pat.findall(all_text)
+        has_role = ('책임감리원' in all_text or '책임 감리원' in all_text) and \
+                   ('보조감리원' in all_text or '보조 감리원' in all_text or '비상주' in all_text)
+        has_career = '전기분야' in all_text or '전기 분야' in all_text or '경력' in all_text
+
+        if grades and has_role and has_career:
+            print(f"    [OCR] p{pn}: 참여감리원 상세 발견 (등급={grades})")
+            return pn
+
+    return -1
+
+
+def _extract_from_page_items(items, page_num):
+    """OCR 아이템 리스트에서 역할별 등급/경력/이름 추출 (공통 로직)
+
+    Returns: personnel dict 또는 None (역할 미감지 시)
+    """
+    import re as _re
+
+    all_text = ' '.join([t for _, _, t, _ in items])
+
+    # ── 역할별 섹션 분리 ──
+    role_positions = []  # [(y, role_name)]
+    for y, x, text, _ in items:
+        t_nospace = text.replace(' ', '')
+        if '책임감리원' in t_nospace:
+            role_positions.append((y, '책임'))
+        elif '보조감리원' in t_nospace:
+            role_positions.append((y, '보조'))
+        elif '비상주감리원' in t_nospace:
+            role_positions.append((y, '비상주'))
+
+    # 폴백: "(1) 책임" / "(2) 보조" / "비상주" 분리 패턴 (종합평가표)
+    if len(role_positions) < 2:
+        role_positions = []
+        for i, (y, x, text, _) in enumerate(items):
+            t_nospace = text.replace(' ', '')
+            if '책임감리원' in t_nospace:
+                role_positions.append((y, '책임'))
+            elif '보조감리원' in t_nospace:
+                role_positions.append((y, '보조'))
+            elif '비상주감리원' in t_nospace:
+                role_positions.append((y, '비상주'))
+            # 분리된 패턴: "(1) 책임" + 인접 "감리원"
+            elif ('(1)' in text or '(1)' in text) and '책임' in text:
+                role_positions.append((y, '책임'))
+            elif ('(2)' in text or '(2)' in text) and '보조' in text:
+                role_positions.append((y, '보조'))
+            elif '비상주' in t_nospace and len(text) < 15:
+                # "비상주" 단독 아이템 — 근처에 "감리원"이 있는지 확인
+                for y2, x2, t2, _ in items:
+                    if abs(y2 - y) < 60 and '감리원' in t2 and t2 != text:
+                        role_positions.append((y, '비상주'))
+                        break
+
+    # 역할별 Y범위 결정
+    role_ranges = {}
+    for i, (y, role) in enumerate(role_positions):
+        if role in role_ranges:
+            continue  # 첫 번째 출현만
+        y_start = y - 150  # 역할 키워드 위로 150px (등급이 위에 있음)
+        if i + 1 < len(role_positions):
+            y_end = role_positions[i + 1][0] - 10
+        else:
+            y_end = y + 300
+        role_ranges[role] = (y_start, y_end)
+
+    # ── 역할별 데이터 추출 ──
+    grade_pat = _re.compile(r'(특급|고급|중급|초급)')
+    career_year_pat = _re.compile(r'(\d{1,3})\s*년\s*(?:(\d{1,2})\s*월)?')
+    career_month_pat = _re.compile(r'(\d{1,4})[.,]?(\d{0,2})\s*월')
+    name_pat = _re.compile(r'[(\(]\s*([가-힣]\s*[가-힣]\s*[가-힣]?)\s*[)\)]')
+
+    personnel = {
+        "책임감리원": {"성명": "", "등급": "", "자격증": "", "생년월일": ""},
+        "보조감리원": [],
+        "비상주감리원": {"성명": "", "등급": "", "자격증": "", "생년월일": ""},
+        "page": page_num + 1,
+    }
+
+    for role, (y_start, y_end) in role_ranges.items():
+        section_items = [(y, x, t, c) for y, x, t, c in items if y_start <= y <= y_end]
+        section_text = ' '.join([t for _, _, t, _ in section_items])
+
+        # 등급 추출
+        grade_match = grade_pat.search(section_text)
+        grade = grade_match.group(1) if grade_match else ""
+
+        # 경력 추출 — Y좌표 근접도 기반
+        def _find_career_near(keyword, items_list):
+            kw_y = None
+            for y, x, t, _ in items_list:
+                if keyword in t or keyword.replace('분야', ' 분야') in t:
+                    kw_y = y
+                    m = career_year_pat.search(t)
+                    if m:
+                        months = int(m.group(1)) * 12 + (int(m.group(2)) if m.group(2) else 0)
+                        if months > 0:
+                            return months
+                    m = career_month_pat.search(t)
+                    if m:
+                        return int(m.group(1))
+                    break
+            if kw_y is None:
+                return 0
+            for y, x, t, _ in items_list:
+                if abs(y - kw_y) > 50:
+                    continue
+                m = career_year_pat.search(t)
+                if m:
+                    months = int(m.group(1)) * 12 + (int(m.group(2)) if m.group(2) else 0)
+                    if months > 0:
+                        return months
+                m = career_month_pat.search(t)
+                if m:
+                    return int(m.group(1))
+            return 0
+
+        elec_months = _find_career_near('전기분야', section_items)
+        field_months = _find_career_near('참여분야', section_items)
+
+        # 이름 추출
+        name = ""
+        nm = name_pat.search(section_text)
+        if nm:
+            name = nm.group(1).replace(' ', '')
+        else:
+            # 폴백: 괄호 없는 한글 2~3자 단독 아이템 (이름 후보)
+            _name_exclude = {'특급', '고급', '중급', '초급', '소계', '합계', '배점', '평점',
+                             '평가', '비고', '등급', '경력', '전기', '실적', '감리', '기술',
+                             '용역', '진행', '준공', '배전', '신용', '부실', '교육', '가점',
+                             '상주', '비상', '책임', '보조', '교체', '업체', '참여'}
+            # 역할 키워드 Y좌표 이후에서만 검색 (헤더 영역 제외)
+            role_y = role_ranges[role][0] + 150  # y_start + 150 = 역할 키워드 원래 Y
+            for y, x, t, _ in section_items:
+                if y < role_y:
+                    continue  # 역할 키워드 위의 헤더 영역 제외
+                t_clean = t.strip().replace(' ', '')
+                if _re.fullmatch(r'[가-힣]{2,3}', t_clean) and t_clean not in _name_exclude:
+                    name = t_clean
+                    break
+
+        elec_years = round(elec_months / 12, 2)
+
+        if role == '책임':
+            personnel["책임감리원"]["성명"] = name
+            personnel["책임감리원"]["등급"] = grade
+        elif role == '보조':
+            personnel["보조감리원"].append({"성명": name, "등급": grade, "경력일수": ""})
+        elif role == '비상주':
+            personnel["비상주감리원"]["성명"] = name
+            personnel["비상주감리원"]["등급"] = grade
+
+        print(f"    [scan] {role}: {name}/{grade}, 전기={elec_years}년({elec_months}월)")
+
+    if not personnel["책임감리원"]["등급"]:
+        return None
+
+    return personnel
+
+
+def extract_personnel_scan(doc, reader):
+    """스캔 PDF에서 참여감리원 등급/경력/이름 추출 (키워드 기반 템플릿 매칭)
+
+    1차: _find_personnel_page_ocr()로 찾은 페이지에서 추출
+    2차: 실패 시 인접 페이지(+1~+3) 시도
+    Returns: personnel dict 또는 None
+    """
+    pn = _find_personnel_page_ocr(doc, reader)
+    if pn < 0:
+        return None
+
+    # 후보 페이지 목록: 발견 페이지 + 인접 페이지
+    candidates = [pn]
+    for offset in [1, 2, 3]:
+        if pn + offset < doc.page_count:
+            candidates.append(pn + offset)
+
+    for try_pn in candidates:
+        page = doc[try_pn]
+        pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
+        img_data = pix.tobytes('png')
+        results = reader.readtext(img_data, batch_size=1)
+        del img_data, pix
+
+        items = []
+        for bbox, text, conf in results:
+            y_mid = (bbox[0][1] + bbox[2][1]) / 2
+            x_mid = bbox[0][0]
+            items.append((y_mid, x_mid, text.strip(), conf))
+        items.sort(key=lambda x: (x[0], x[1]))
+
+        result = _extract_from_page_items(items, try_pn)
+        if result:
+            return result
+
+    return None
+
+
 # ── find_tables 헬퍼 함수 ──
 
 _NAME_FILTER = {'책임감리원', '보조감리원', '비상주', '감리원', '전기', '토목',
@@ -474,6 +775,25 @@ def _extract_cert_from_cells(row):
     return ""
 
 
+def _parse_edu_dates(cell_value):
+    """col[9] 교육수료일자 파싱 → (일반교육일, 배전전문교육일) tuple
+
+    col[9] 형식: "2024-02-01\n2025-04-18" (일반\n전문)
+    '-' 또는 빈값은 미이수 → None
+    """
+    if not cell_value:
+        return None, None
+    lines = cell_value.strip().split('\n')
+    general = lines[0].strip() if len(lines) > 0 else None
+    special = lines[1].strip() if len(lines) > 1 else None
+    # '-' 또는 빈값은 미이수
+    if general in (None, '', '-'):
+        general = None
+    if special in (None, '', '-'):
+        special = None
+    return general, special
+
+
 def extract_personnel_v2(doc, page_map):
     """양식2-4 find_tables() 기반 인력 추출 — 업체별 양식 차이 자동 대응
 
@@ -488,6 +808,8 @@ def extract_personnel_v2(doc, page_map):
         "비상주감리원": {"성명": "", "등급": "", "자격증": "", "생년월일": ""},
         "page": -1,
     }
+    # 교육수료일 추적: 인원별 일반교육/배전전문교육 이수 여부
+    edu_records = []  # [{"역할": str, "성명": str, "일반교육": str|None, "배전전문교육": str|None}]
 
     pages = page_map.get("양식2-4", [])
     if not pages:
@@ -507,6 +829,8 @@ def extract_personnel_v2(doc, page_map):
 
     current_role = None
     bozo_person = None  # 현재 보조감리원 dict 참조
+    # Variant A 대응: 역할 행에 교육수료일이 있고 이름은 다음 행 → 임시 저장
+    pending_edu = {}  # role → (general, special)
 
     for i in range(2, len(rows)):  # 헤더 2행 skip
         row = rows[i]
@@ -536,10 +860,22 @@ def extract_personnel_v2(doc, page_map):
         birth = _extract_date_from_cells(row)
         cert = _extract_cert_from_cells(row)
 
+        # col[9] 교육수료일 추출 (역할 행에만 존재)
+        edu_general, edu_special = None, None
+        if len(row) > 9 and row[9]:
+            edu_general, edu_special = _parse_edu_dates(row[9])
+            if edu_general or edu_special:
+                pending_edu[current_role] = (edu_general, edu_special)
+
         if current_role == '책임':
             p = personnel["책임감리원"]
             if name and not p["성명"]:
                 p["성명"] = name
+                # 이름 확정 시 교육수료일 기록 추가
+                if '책임' in pending_edu:
+                    eg, es = pending_edu.pop('책임')
+                    edu_records.append({"역할": "책임", "성명": name,
+                                        "일반교육": eg, "배전전문교육": es})
             if grade and not p["등급"]:
                 p["등급"] = grade
             if birth and not p["생년월일"]:
@@ -549,12 +885,20 @@ def extract_personnel_v2(doc, page_map):
         elif current_role == '보조' and bozo_person:
             if name and not bozo_person["성명"]:
                 bozo_person["성명"] = name
+                if '보조' in pending_edu:
+                    eg, es = pending_edu.pop('보조')
+                    edu_records.append({"역할": "보조", "성명": name,
+                                        "일반교육": eg, "배전전문교육": es})
             if grade and not bozo_person["등급"]:
                 bozo_person["등급"] = grade
         elif current_role == '비상주':
             p = personnel["비상주감리원"]
             if name and not p["성명"]:
                 p["성명"] = name
+                if '비상주' in pending_edu:
+                    eg, es = pending_edu.pop('비상주')
+                    edu_records.append({"역할": "비상주", "성명": name,
+                                        "일반교육": eg, "배전전문교육": es})
             if grade and not p["등급"]:
                 p["등급"] = grade
             if birth and not p["생년월일"]:
@@ -566,10 +910,16 @@ def extract_personnel_v2(doc, page_map):
     if not personnel["책임감리원"]["성명"] or not personnel["책임감리원"]["등급"]:
         return None
 
+    # 교육수료일 기록 저장
+    personnel["교육수료"] = edu_records
+
     print(f"    [v2] 책임: {personnel['책임감리원']['성명']}/{personnel['책임감리원']['등급']}, "
           f"보조: {personnel['보조감리원'][0]['성명'] if personnel['보조감리원'] else '-'}/"
           f"{personnel['보조감리원'][0]['등급'] if personnel['보조감리원'] else '-'}, "
           f"비상주: {personnel['비상주감리원']['성명']}/{personnel['비상주감리원']['등급']}")
+    for rec in edu_records:
+        print(f"    [교육] {rec['역할']} {rec['성명']}: "
+              f"일반={rec['일반교육'] or '미이수'}, 배전전문={rec['배전전문교육'] or '미이수'}")
 
     return personnel
 
@@ -2047,14 +2397,27 @@ def calculate_scores_by_criteria(pdf_data):
         calc["개발실적_계산점수"] = dev_calc
         calc["개발실적_근거"] = f"{dev_cnt}건 합산(max4점)"
 
-    # 8-1. 교육실적 (최근3년 전기공사감리 교육훈련 이수 시 2점)
-    edu_score = pdf_data.get("교육실적_기재점수", 0)
-    if edu_score > 0:
-        calc["교육실적_계산점수"] = 2.0
-        calc["교육실적_근거"] = "교육이수→2점"
+    # 8-1. 교육실적 — 양식2-4 교육수료일 기반 독립 계산
+    # (1) 일반교육: (이수인원/평가대상인원) × 1점
+    # (2) 배전전문교육: (이수인원/평가대상인원) × 1점
+    # 합산 후 소수점 둘째자리 반올림 (round 1)
+    edu_records = pdf_data.get("교육수료", [])
+    if edu_records:
+        total = len(edu_records)  # 평가대상인원 = 참여감리원 수
+        general_count = sum(1 for r in edu_records if r.get("일반교육"))
+        special_count = sum(1 for r in edu_records if r.get("배전전문교육"))
+        edu_calc = round((general_count / total) * 1 + (special_count / total) * 1, 1)
+        calc["교육실적_계산점수"] = edu_calc
+        calc["교육실적_근거"] = f"일반{general_count}/{total}×1 + 배전{special_count}/{total}×1 = {edu_calc}점"
     else:
-        calc["교육실적_계산점수"] = 0.0
-        calc["교육실적_근거"] = "교육미이수→0점"
+        # 교육수료 데이터 없으면 기재점수 폴백
+        edu_score = pdf_data.get("교육실적_기재점수", 0)
+        if edu_score > 0:
+            calc["교육실적_계산점수"] = edu_score
+            calc["교육실적_근거"] = f"기재점수({edu_score}점) 사용(교육수료일 미추출)"
+        else:
+            calc["교육실적_계산점수"] = 0.0
+            calc["교육실적_근거"] = "교육미이수→0점"
 
     # 9. 상주감리원 중첩도
     overlap_raw = pdf_data.get("overlap_raw", {})
@@ -2144,6 +2507,13 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
     if personnel is None:
         print("  → [v2 실패] 기존 방식으로 폴백")
         personnel = extract_personnel(doc)
+    # 텍스트 추출 실패 시 스캔 PDF OCR 폴백
+    if not personnel["책임감리원"]["등급"]:
+        print("  → [텍스트 실패] 스캔 PDF OCR 추출 시도")
+        reader = get_reader()
+        scan_result = extract_personnel_scan(doc, reader)
+        if scan_result:
+            personnel = scan_result
     print(f"  → 책임감리원: {personnel['책임감리원']['성명']} / {personnel['책임감리원']['등급']}")
     if personnel["보조감리원"]:
         print(f"  → 보조감리원: {personnel['보조감리원'][0]['성명']}")
@@ -2257,6 +2627,7 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
         "개발실적_계산점수": tech_dev["개발실적_계산점수"],
         "개발실적_항목수": tech_dev["개발실적_항목수"],
         "교육실적_기재점수": tech_dev["교육실적_기재점수"],
+        "교육수료": personnel.get("교육수료", []),
         "tech_dev_raw": tech_dev,
         # 업무중첩도 세부증빙 (양식2-10 독립 추출)
         "상주중첩_기재점수": overlap["상주_기재점수"],
