@@ -123,9 +123,12 @@ pq/
 
 ## 주요 구현 이슈 / 해결 내역
 
-### 서버 재시작 필수
-`debug=False` 설정 → 코드 변경 시 자동 재로드 없음.
-변경 후 반드시 서버 프로세스를 종료하고 `python app.py` 재실행해야 함.
+### 서버 재시작
+`debug=True, use_reloader=False` 설정.
+- reloader OFF: 분석 도중 파일 변경으로 서버가 재시작되어 "Failed to fetch" 오류 방지
+- **서버 코드 변경** (app.py, pq_extractor.py): 서버 수동 재시작 필요 (`python app.py`)
+- **프론트엔드 변경** (index.html): 브라우저 F5, 캐시 문제 시 Ctrl+Shift+R (강력 새로고침)
+- **서버 재시작**: `netstat -ano | findstr :5002`로 잔여 프로세스 확인 후 `taskkill`로 종료, `python app.py` 재실행
 
 ### REPLACEMENT_RATE_SCORE 정렬 방향
 높은 임계값(50%)이 먼저 와야 함 — `lookup_score`가 내림차순 가정.
