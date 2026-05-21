@@ -750,10 +750,26 @@ def export_evaluation_sheet(results_list, output_path, template_path=None):
         ws.title = "사전심사집계표"
         _create_template_header(ws)
 
+    # P5, Q5 헤더 보장 (템플릿 사용 여부 무관)
+    header_font = Font(name='맑은 고딕', size=8)
+    header_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    for col_letter, val in [('P', '검토담당자'), ('Q', '특이사항 작성\n(없을시 공란)')]:
+        cell = ws[f'{col_letter}5']
+        cell.value = val
+        cell.font = header_font
+        cell.alignment = header_align
+    if ws.column_dimensions['P'].width < 12:
+        ws.column_dimensions['P'].width = 12
+    if ws.column_dimensions['Q'].width < 20:
+        ws.column_dimensions['Q'].width = 20
+
+    # 순번 오름차순 정렬
+    sorted_list = sorted(results_list, key=lambda d: int(d.get("순번") or 9999))
+
     start_row = 6
-    for idx, data in enumerate(results_list):
+    for idx, data in enumerate(sorted_list):
         row = start_row + idx
-        ws.cell(row=row, column=1, value=idx + 1)
+        ws.cell(row=row, column=1, value=data.get("순번") or (idx + 1))
         ws.cell(row=row, column=2, value=data.get("사업자번호", ""))
         ws.cell(row=row, column=3, value=data.get("업체명", ""))
         ws.cell(row=row, column=8, value=data.get("참여감리원_점수", 0))
@@ -794,13 +810,15 @@ def _create_template_header(ws):
     ws['H4'].alignment = Alignment(horizontal='center')
     headers_5 = {'H': '참여\n감리원', 'I': '유사용역\n수행실적', 'J': '기술개발\n및 투자실적',
                   'K': '업무\n중첩도', 'L': '교체\n빈도', 'M': '작업계획\n및 기법',
-                  'N': '가점·감점', 'O': '소계'}
+                  'N': '가점·감점', 'O': '소계', 'P': '검토담당자',
+                  'Q': '특이사항 작성\n(없을시 공란)'}
     for col, val in headers_5.items():
         ws[f'{col}5'] = val
         ws[f'{col}5'].font = Font(name='맑은 고딕', size=8)
         ws[f'{col}5'].alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
     widths = {'A': 5, 'B': 14, 'C': 18, 'D': 7, 'E': 14, 'F': 18, 'G': 7,
-              'H': 8, 'I': 10, 'J': 10, 'K': 8, 'L': 7, 'M': 10, 'N': 8, 'O': 7}
+              'H': 8, 'I': 10, 'J': 10, 'K': 8, 'L': 7, 'M': 10, 'N': 8, 'O': 7,
+              'P': 12, 'Q': 20}
     for col, w in widths.items():
         ws.column_dimensions[col].width = w
 
@@ -861,28 +879,80 @@ def api_analyze():
         excel_file.save(excel_path)
 
     try:
+        import time as _time
+        _log = []
+
         # 1. PDF 분석
+        t0 = _time.time()
         pdf_data = analyze_company(pdf_path, bidding_date, cost_tier)
+        t1 = _time.time()
+        _log.append(f"[타이머] PDF 분석: {t1-t0:.1f}초")
 
         # 2. Excel 파싱
         excel_data = {}
         if excel_path:
             excel_data = parse_company_excel(excel_path)
+        t2 = _time.time()
+        _log.append(f"[타이머] Excel 파싱: {t2-t1:.1f}초")
 
         # 3. 교차검증
         verification = cross_verify(pdf_data, excel_data)
+        t3 = _time.time()
+        _log.append(f"[타이머] 교차검증: {t3-t2:.1f}초")
 
         # 3.5 KEEA 확인서 진위여부 조회
+        skip_keea = request.form.get('skip_keea', '') == '1'
         keea_certs = pdf_data.get("keea_certs", [])
         keea_results = []
-        if keea_certs:
-            print("[KEEA] 확인서 진위여부 조회 중...")
+        if keea_certs and not skip_keea:
+            _log.append("[KEEA] 확인서 진위여부 조회 중...")
             keea_results = verify_all_keea_certs(keea_certs)
+            for kr in keea_results:
+                status = "O" if kr["진위확인"] else ("X" if kr["진위확인"] is False else "?")
+                _log.append(f"  [KEEA] {kr['성명']} {kr['발급번호']} → {status}")
+        elif skip_keea:
+            _log.append("[KEEA] 생략 (사용자 선택)")
+        t4 = _time.time()
+        _log.append(f"[타이머] KEEA 조회: {t4-t3:.1f}초")
+        _log.append(f"[타이머] === 총 소요: {t4-t0:.1f}초 ({pdf_basename}) ===")
+
+        # 추출 결과 요약 로그 생성
+        _log.insert(0, f"대상: {pdf_basename}")
+        _log.insert(1, f"업체명: {pdf_data.get('업체명', '?')}")
+        _log.insert(2, f"실격여부: {pdf_data.get('실격여부', '?')}")
+        _log.insert(3, f"책임감리원: {pdf_data.get('책임_성명','-')} / {pdf_data.get('책임_등급','-')}")
+        _log.insert(4, f"보조감리원: {pdf_data.get('보조1_성명','-')} / {pdf_data.get('보조_등급','-')}")
+        _log.insert(5, f"비상주감리원: {pdf_data.get('비상주_성명','-')} / {pdf_data.get('비상주_등급','-')}")
+        _log.insert(6, "─" * 40)
+
+        server_log = "\n".join(_log)
+        print(server_log)
 
         # 4. 평가표용 데이터
+        # 폴더명에서 순번/업체명 추출 (예: "186.주식회사 성문기술단")
+        folder_name = request.form.get('folder_name', '')
+        biz_num = request.form.get('biz_num', '')
+        folder_order = ''
+        folder_company = ''
+        if folder_name and '.' in folder_name:
+            dot_idx = folder_name.index('.')
+            folder_order = folder_name[:dot_idx]
+            folder_company = folder_name[dot_idx + 1:]
+
+        # 업체명: PDF추출 → Excel → 폴더명 → 파일명 순서로 폴백
+        pdf_company = pdf_data.get("업체명", "")
+        if pdf_company == "미확인":
+            pdf_company = ""
+        # 파일명에서 업체명 추출: "(주)XXX(사업자번호)" → "(주)XXX"
+        file_company = ""
+        fn_match = re.match(r'(.+?)[\(（]\d{3}-\d{2}-\d{5}', pdf_basename)
+        if fn_match:
+            file_company = fn_match.group(1).strip()
+        company_name = pdf_company or excel_data.get("업체명", "") or folder_company or file_company
         eval_data = {
-            "업체명": pdf_data.get("업체명") or excel_data.get("업체명", ""),
-            "사업자번호": "",
+            "업체명": company_name,
+            "사업자번호": biz_num,
+            "순번": folder_order,
             "참여감리원_점수": pdf_data.get("참여감리원_소계", 0) or excel_data.get("참여감리원_소계", 0),
             "유사용역_점수": pdf_data.get("유사용역_점수", 0) or excel_data.get("유사용역_점수", 0),
             "기술개발_점수": pdf_data.get("기술개발_점수", 0) or excel_data.get("기술개발_점수", 0),
@@ -891,6 +961,10 @@ def api_analyze():
             "가감점": pdf_data.get("가점_자격증", 0) or (excel_data.get("가점_자격증", 0) - excel_data.get("부실벌점", 0)),
             "총점": pdf_data.get("업체제출_총점", 0) or excel_data.get("총점", 0),
         }
+
+        # pdf_data 업체명도 보정 (상세 결과 표시용)
+        if company_name and pdf_data.get("업체명") in ("미확인", "", None):
+            pdf_data["업체명"] = company_name
 
         _last_result = {
             "pdf_data": pdf_data,
@@ -911,6 +985,7 @@ def api_analyze():
             "verification": verification,
             "eval_data": eval_data,
             "keea_results": keea_results,
+            "server_log": server_log,
         })
 
     except Exception as e:
@@ -954,4 +1029,11 @@ if __name__ == '__main__':
     print("  배전감리 PQ 심사 교차검증 시스템")
     print("  http://localhost:5002")
     print("=" * 60 + "\n")
-    app.run(host='0.0.0.0', port=5002, debug=False)
+
+    # EasyOCR 엔진 서버 시작 시 미리 로딩 (첫 분석 5~10초 절약)
+    print("[INFO] OCR 엔진 사전 로딩 중...")
+    from pq_extractor import get_reader
+    get_reader()
+
+    # use_reloader=False: 분석 도중 파일 변경 감지로 서버 재시작 방지
+    app.run(host='0.0.0.0', port=5002, debug=True, use_reloader=False)

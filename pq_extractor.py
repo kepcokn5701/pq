@@ -276,41 +276,30 @@ def _save_page_cache(page_num, parsed):
         print(f"  [WARN] 캐시 저장 실패 (p{page_num+1}): {e}")
 
 
-def ocr_page(doc, page_num, zoom=1.0):
-    """PDF 페이지를 OCR하여 텍스트 리스트 반환 (메모리+파일 캐시)"""
-    # 1) 메모리 캐시
-    cache_key = (id(doc), page_num)
+def ocr_page(doc, page_num, zoom=1.5):
+    """PDF 페이지를 OCR하여 텍스트 리스트 반환 (메모리 캐시만 사용)"""
+    # 메모리 캐시 (같은 분석 내 중복 OCR 방지)
+    cache_key = (id(doc), page_num, zoom)
     if cache_key in _ocr_memory_cache:
         return _ocr_memory_cache[cache_key]
 
-    # 2) 파일(JSON) 캐시 → 있으면 OCR 건너뛰기
-    cached = _load_page_cache(page_num)
-    if cached is not None:
-        _ocr_memory_cache[cache_key] = cached
-        return cached
-
-    # 3) OCR 실행
     reader = get_reader()
     page = doc[page_num]
     mat = fitz.Matrix(zoom, zoom)
     pix = page.get_pixmap(matrix=mat)
     img_data = pix.tobytes('png')
     del pix
-    gc.collect()
 
     try:
         results = reader.readtext(img_data, batch_size=1)
     except Exception as e:
-        # numpy ArrayMemoryError, MemoryError, RuntimeError 등 모두 캐치
         print(f"  [WARN] 페이지 {page_num+1} OCR 실패({type(e).__name__}), 저해상도 재시도...")
         del img_data
         gc.collect()
-        # 0.8배로 축소하여 재시도
         mat = fitz.Matrix(0.8, 0.8)
         pix = page.get_pixmap(matrix=mat)
         img_data = pix.tobytes('png')
         del pix
-        gc.collect()
         try:
             results = reader.readtext(img_data, batch_size=1)
         except Exception as e2:
@@ -320,17 +309,12 @@ def ocr_page(doc, page_num, zoom=1.0):
             return []
 
     parsed = [(text, conf, bbox) for (bbox, text, conf) in results]
-
-    # 캐시 저장 (메모리 + 파일)
     _ocr_memory_cache[cache_key] = parsed
-    _save_page_cache(page_num, parsed)
-
     del img_data, results
-    gc.collect()
     return parsed
 
 
-def ocr_page_text(doc, page_num, zoom=1.0):
+def ocr_page_text(doc, page_num, zoom=1.5):
     """페이지의 전체 텍스트를 하나의 문자열로 반환"""
     results = ocr_page(doc, page_num, zoom)
     return ' '.join([text for (text, conf, bbox) in results])
@@ -384,7 +368,7 @@ def classify_pages(doc):
     # 우선순위 순서: 고유 식별자가 있는 양식 먼저 매칭
     FORM_RULES = [
         ("양식2-3", [["종합득점표"], ["양식2-3"]]),
-        ("양식2-4", [["양식2-4"], ["참여감리원", "자격사항", "자격등급"]]),
+        ("양식2-4", [["양식2-4"], ["참여감리원", "자격사항", "자격등급"], ["참여감리원", "책임감리원", "보조감리원"]]),
         ("양식2-5_책임", [["양식2-5", "1. 책임감리원"], ["양식2-5", "책임감리원"]]),
         ("양식2-5_보조", [["양식2-5", "2. 보조감리원"], ["양식2-5", "보조감리원"]]),
         ("양식2-5_비상주", [["3. 비상주감리원"], ["양식2-5", "비상주감리원"]]),
@@ -407,9 +391,10 @@ def classify_pages(doc):
 # ── 스캔 PDF 대응: OCR 기반 페이지 탐색 + 인력 추출 ──
 
 def classify_pages_ocr(doc, reader):
-    """스캔 PDF 전체 페이지를 OCR로 분류 → 페이지 맵 반환
+    """스캔 PDF 핵심 양식 페이지를 OCR로 분류 → 페이지 맵 반환
 
-    페이지 상단 20%만 OCR하여 양식 번호를 빠르게 탐색.
+    페이지 상단 25%만 OCR하여 양식 번호를 빠르게 탐색.
+    속도 최적화: 앞쪽 60% 페이지만 탐색, 최대 30회 OCR 제한.
     Returns: {"양식2-4": [38, 39, ...], "양식2-9": [80], ...}
     """
     page_map = {}
@@ -425,7 +410,16 @@ def classify_pages_ocr(doc, reader):
         ("양식2-11", [["양식2-11", "교체빈도"]]),
     ]
 
-    for pn in range(doc.page_count):
+    required_forms = {r[0] for r in FORM_RULES}
+    max_ocr = 30  # 최대 OCR 횟수 (약 90초 제한)
+    ocr_count = 0
+    # 양식은 보통 앞쪽 60%에 집중 (뒤쪽은 증빙첨부)
+    max_page = min(int(doc.page_count * 0.6), doc.page_count)
+
+    for pn in range(max_page):
+        if ocr_count >= max_ocr:
+            print(f"    [OCR] 최대 {max_ocr}회 도달, 탐색 중단")
+            break
         # 내장 텍스트가 있으면 건너뜀 (이미 classify_pages()로 처리됨)
         if len(doc[pn].get_text().strip()) > 100:
             continue
@@ -434,19 +428,24 @@ def classify_pages_ocr(doc, reader):
         rect = page.rect
         # 상단 25%만 크롭하여 OCR → 속도 최적화
         clip = fitz.Rect(rect.x0, rect.y0, rect.x1, rect.y0 + rect.height * 0.25)
-        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), clip=clip)
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), clip=clip)
         img_data = pix.tobytes('png')
         results = reader.readtext(img_data, batch_size=1)
         header_text = ' '.join([t for _, t, _ in results])
         del img_data, pix
+        ocr_count += 1
 
         for form_id, keyword_sets in FORM_RULES:
             if any(all(kw in header_text for kw in kws) for kws in keyword_sets):
                 page_map.setdefault(form_id, []).append(pn)
                 break
 
+        # 모든 양식을 찾았으면 조기 종료
+        if required_forms.issubset(page_map.keys()):
+            break
+
     if page_map:
-        print(f"    [OCR page_map] {page_map}")
+        print(f"    [OCR page_map] {page_map} (OCR {ocr_count}회)")
     return page_map
 
 
@@ -465,7 +464,7 @@ def smart_find_page_with_ocr(doc, reader, keywords, search_range, label=""):
         page = doc[page_num]
         rect = page.rect
         clip = fitz.Rect(rect.x0, rect.y0, rect.x1, rect.y0 + rect.height * 0.25)
-        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), clip=clip)
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), clip=clip)
         img_data = pix.tobytes('png')
         results = reader.readtext(img_data, batch_size=1)
         header_text = ' '.join([t for _, t, _ in results])
@@ -487,20 +486,20 @@ def _find_personnel_page_ocr(doc, reader):
     """
     import re as _re
 
-    # 1차: 양식2-4 제목으로 탐색 (상단 OCR)
-    pn = smart_find_page_with_ocr(doc, reader, ['양식2-4'], range(0, min(80, doc.page_count)), '양식2-4')
+    # 1차: 양식2-4 제목으로 탐색 (상단 OCR, 앞쪽 25페이지)
+    pn = smart_find_page_with_ocr(doc, reader, ['양식2-4'], range(0, min(25, doc.page_count)), '양식2-4')
     if pn >= 0:
         return pn
 
-    # 2차: 역할+등급+경력 조합 (평가서 표지 포함)
+    # 2차: 역할+등급+경력 조합 (앞쪽 10페이지만 — 전체 OCR이라 느림)
     grade_pat = _re.compile(r'(특급|고급|중급|초급)')
 
-    for pn in range(0, min(50, doc.page_count)):
+    for pn in range(0, min(10, doc.page_count)):
         if len(doc[pn].get_text().strip()) > 100:
             continue
 
         page = doc[pn]
-        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
         img_data = pix.tobytes('png')
         results = reader.readtext(img_data, batch_size=1)
         all_text = ' '.join([t for _, t, _ in results])
@@ -667,14 +666,21 @@ def _extract_from_page_items(items, page_num):
     return personnel
 
 
-def extract_personnel_scan(doc, reader):
-    """스캔 PDF에서 참여감리원 등급/경력/이름 추출 (키워드 기반 템플릿 매칭)
+def extract_personnel_scan(doc, reader, page_map=None):
+    """스캔 PDF에서 참여감리원 등급/경력/이름 추출 (키워드 ���반 템플릿 매칭)
 
-    1차: _find_personnel_page_ocr()로 찾은 페이지에서 추출
-    2차: 실패 시 인접 페이지(+1~+3) 시도
+    1차: page_map에서 양식2-4 ���치가 있으면 바로 사용 (OCR 페이지 탐색 스킵)
+    2차: _find_personnel_page_ocr()로 찾은 페이지에서 추출
+    3차: 실패 시 인접 페이지(+1~+3) 시도
     Returns: personnel dict 또는 None
     """
-    pn = _find_personnel_page_ocr(doc, reader)
+    pn = -1
+    # page_map에 양식2-4가 이미 있으면 활용 (OCR 재탐색 불필요)
+    if page_map and '양식2-4' in page_map and page_map['양식2-4']:
+        pn = page_map['양식2-4'][0]
+        print(f"    [OCR] page_map에서 양식2-4 위치 활용: p{pn+1}")
+    if pn < 0:
+        pn = _find_personnel_page_ocr(doc, reader)
     if pn < 0:
         return None
 
@@ -686,7 +692,7 @@ def extract_personnel_scan(doc, reader):
 
     for try_pn in candidates:
         page = doc[try_pn]
-        pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
         img_data = pix.tobytes('png')
         results = reader.readtext(img_data, batch_size=1)
         del img_data, pix
@@ -1188,6 +1194,179 @@ def extract_summary_table(doc):
                             break
 
     return result
+
+
+def _parse_summary_page_ocr(doc, reader, pn):
+    """종합평가표 한 페이지를 OCR하여 항목별 점수 파싱 (내부 함수)"""
+    result = {
+        "참여감리원": 0, "유사용역": 0, "신용도": 0, "기술개발": 0,
+        "업무중첩도": 0, "교체빈도": 0, "작업계획": 0, "가감점": 0,
+        "총점": 0, "page": pn + 1,
+    }
+
+    page = doc[pn]
+    pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+    img_data = pix.tobytes('png')
+    ocr_results = reader.readtext(img_data, batch_size=1)
+    del img_data, pix
+
+    items = []
+    for bbox, text, conf in ocr_results:
+        x = bbox[0][0]
+        y = (bbox[0][1] + bbox[2][1]) / 2
+        items.append((y, x, text.strip(), conf))
+    items.sort(key=lambda t: (t[0], t[1]))
+
+    # ─── 헤더에서 평점 컬럼 x 위치 감지 ───
+    score_col_x = None
+    alloc_col_x = None
+    header_y_max = 0
+    for y, x, text, conf in items:
+        if y > 300:
+            break
+        clean = text.replace(' ', '')
+        if x > 700:
+            if '평점' in clean and '평가' not in clean:
+                score_col_x = x
+                header_y_max = max(header_y_max, y)
+            if '배점' in clean:
+                alloc_col_x = x
+
+    if score_col_x is None:
+        right_xs = [x for y_, x, t, c in items if x > 800 and re.match(r'^\d+\.?\d*$', t)]
+        if right_xs:
+            score_col_x = max(right_xs)
+    if score_col_x is None:
+        score_col_x = 860
+    if alloc_col_x is None or alloc_col_x >= score_col_x:
+        alloc_col_x = score_col_x - 80
+
+    # ─── 섹션 마커(가~아)로 카테고리 y범위 결정 ───
+    SECTION_MAP = [
+        ('가', '참여감리원', ['참여감리원']),
+        ('나', '유사용역', ['유사용역']),
+        ('다', '신용도', ['신용도', '신 용 도']),
+        ('라', '기술개발', ['기술개발']),
+        ('마', '업무중첩도', ['업무중첩도', '업무중청도', '중첩도', '업무중첩']),
+        ('바', '교체빈도', ['교체빈도', '교체반도']),
+        ('사', '작업계획', ['작업계획']),
+        ('아', '가감점', ['가점', '가감점']),
+    ]
+
+    section_ys = []
+    for marker, cat, kw_list in SECTION_MAP:
+        for y_, x_, text_, conf_ in items:
+            if x_ < 400 and y_ > header_y_max:
+                clean = text_.replace(' ', '').replace(':', '').replace('.', '')
+                if clean.startswith(marker) or any(kw in text_ for kw in kw_list):
+                    section_ys.append((y_, cat))
+                    break
+
+    section_ys.sort(key=lambda t: t[0])
+    data_y_start = header_y_max + 30 if header_y_max > 0 else 250
+
+    cat_ranges = {}
+    for i, (y_pos, cat) in enumerate(section_ys):
+        y_lo = data_y_start if i == 0 else y_pos - 30
+        y_hi = section_ys[i + 1][0] - 30 if i + 1 < len(section_ys) else y_pos + 200
+        cat_ranges[cat] = (y_lo, y_hi)
+
+    # ─── 합계 행에서 총점 추출 ───
+    for y_, x_, text_, conf_ in items:
+        clean = text_.replace(' ', '')
+        if ('합계' in clean or ('합' in text_ and '계' in text_)) and '소' not in clean and x_ < 500:
+            for y2, x2, t2, c2 in items:
+                if abs(y2 - y_) < 30 and x2 > 650:
+                    m = re.match(r'^(\d+\.?\d*)$', t2)
+                    if m:
+                        val = float(m.group(1))
+                        if 50 <= val <= 120:
+                            result["총점"] = val
+            break
+
+    # ─── 각 섹션의 평점 컬럼 합산 (x클러스터링) ───
+    ALLOC_MAP = {"참여감리원": 50, "유사용역": 10, "신용도": 10, "기술개발": 10,
+                 "업무중첩도": 10, "교체빈도": 5, "작업계획": 5, "가감점": 5}
+
+    for cat, (y_lo, y_hi) in cat_ranges.items():
+        alloc = ALLOC_MAP.get(cat, 10)
+        nums = []
+        for y_, x_, text_, conf_ in items:
+            if y_lo <= y_ <= y_hi and x_ > 700:
+                m = re.match(r'^(\d+\.?\d*)$', text_)
+                if m:
+                    val = float(m.group(1))
+                    if val <= alloc + 1:
+                        nums.append((x_, val))
+
+        if not nums:
+            continue
+
+        xs = [x for x, _ in nums]
+        x_spread = max(xs) - min(xs)
+
+        if x_spread > 50:
+            x_mid = (min(xs) + max(xs)) / 2
+            right_vals = [v for x, v in nums if x > x_mid]
+            if right_vals:
+                result[cat] = min(sum(right_vals), alloc)
+        else:
+            result[cat] = min(sum(v for _, v in nums), alloc)
+
+    return result
+
+
+def extract_summary_table_ocr(doc, reader, page_map=None):
+    """스캔 PDF용 종합득점표 OCR 추출 (범용)
+
+    별표15 종합평가표는 표준 양식이므로:
+    1. 헤더에서 '평점' 컬럼 x좌표를 동적 감지
+    2. 왼쪽 마진 섹션 마커(가~아)로 y범위 결정
+    3. 평점 컬럼 내 숫자를 섹션별 합산
+    """
+    empty = {
+        "참여감리원": 0, "유사용역": 0, "신용도": 0, "기술개발": 0,
+        "업무중첩도": 0, "교체빈도": 0, "작업계획": 0, "가감점": 0,
+        "총점": 0, "page": -1,
+    }
+
+    kws = ['종합득점표', '종합평가표', '종합득점']
+    candidates = []  # (page_num, source)
+
+    # 0차: 내장 텍스트에서 키워드 탐색 (즉시)
+    for cp in range(0, min(20, doc.page_count)):
+        text = doc[cp].get_text()
+        if any(kw in text for kw in kws):
+            candidates.append(cp)
+
+    # 1차: page_map 양식2-3 위치 활용 (±2페이지)
+    if page_map and '양식2-3' in page_map:
+        base = page_map['양식2-3'][0]
+        for offset in [0, 1, -1, 2]:
+            cp = base + offset
+            if 0 <= cp < doc.page_count and cp not in candidates:
+                candidates.append(cp)
+
+    # 2차: header OCR (스캔 전용, 텍스트 없는 페이지만)
+    if not candidates:
+        pn = smart_find_page_with_ocr(doc, reader, kws, range(0, min(20, doc.page_count)), '종합득점표')
+        if pn >= 0:
+            candidates.append(pn)
+
+    # 후보 페이지 순회: 총점 > 0 이면 성공
+    for pn in candidates:
+        result = _parse_summary_page_ocr(doc, reader, pn)
+        if result["총점"] > 0:
+            print(f"    [종합득점표] 페이지 {pn+1}에서 발견 (OCR)")
+            return result
+        # 총점 0이면 다음 페이지도 시도
+        if pn + 1 < doc.page_count and pn + 1 not in candidates:
+            result2 = _parse_summary_page_ocr(doc, reader, pn + 1)
+            if result2["총점"] > 0:
+                print(f"    [종합득점표] 페이지 {pn+2}에서 발견 (OCR, 다음 페이지)")
+                return result2
+
+    return empty
 
 
 def extract_personnel(doc):
@@ -2180,7 +2359,6 @@ def extract_keea_certificates(doc):
         if len(certs) >= 3:
             break
 
-    gc.collect()
     return certs
 
 
@@ -2319,6 +2497,8 @@ def calculate_scores_by_criteria(pdf_data):
 
     # ── 1. 책임감리원 ──
     grade = pdf_data.get("책임_등급", "")
+    if grade:
+        calc["책임_등급_근거"] = grade
 
     # 1-1. 전기분야 경력 (등급 무관, 공사비만)
     elec_years = pdf_data.get("책임_전기경력_년", 0) or 0
@@ -2340,6 +2520,8 @@ def calculate_scores_by_criteria(pdf_data):
 
     # ── 2. 보조감리원 ──
     asst_grade = pdf_data.get("보조_등급", "")
+    if asst_grade:
+        calc["보조_등급_근거"] = asst_grade
     asst_elec_years = pdf_data.get("보조_전기경력_년", 0) or 0
     if asst_elec_years > 0 or pdf_data.get("보조_전기경력_점수", 0) > 0:
         s, b = calc_career_score(asst_elec_years, "보조_전기", asst_grade, cost_tier)
@@ -2473,33 +2655,50 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
     print(f"  입찰공고일: {bidding_date}")
     print(f"{'='*60}\n")
 
-    set_current_pdf(pdf_path)  # 파일 캐시 경로 설정
+    import time as _t
+    _t0 = _t.time()
+
     doc = fitz.open(pdf_path)
-    print(f"[INFO] PDF 열림: 총 {doc.page_count} 페이지")
-    cache_dir = _get_cache_dir()
-    if cache_dir and os.path.exists(cache_dir):
-        cached_count = len([f for f in os.listdir(cache_dir) if f.endswith('.json')])
-        if cached_count > 0:
-            print(f"[INFO] 캐시 발견: {cached_count}페이지 OCR 결과 재사용")
-    print()
+    print(f"[INFO] PDF 열림: 총 {doc.page_count} 페이지\n")
+
+    def _lap(label):
+        nonlocal _t0
+        now = _t.time()
+        print(f"  [{now - _t0:.1f}초] {label}")
+        _t0 = now
 
     # 1. 업체명 추출
     print("[1/5] 업체명 추출 중...")
     company_name = extract_company_name(doc)
     print(f"  → 업체명: {company_name}")
+    _lap("업체명 추출")
 
     # 2. 종합득점표 추출
     print("[2/5] 종합득점표 추출 중...")
     summary = extract_summary_table(doc)
+
+    # 2.5 페이지 분류 (find_tables 기반 추출용)
+    page_map = classify_pages(doc)
+    is_scan_pdf = len(page_map) < 3  # 양식을 3개 미만으로 찾으면 스캔 PDF 의심
+    reader = None
+
+    # 종합득점표 텍스트 추출 실패 시 OCR 폴백 (총점 0이면 항상 시도)
+    if summary["총점"] == 0:
+        print("  → [텍스트 추출 실패] 종합득점표 OCR 추출 시도")
+        reader = get_reader()
+        if reader:
+            ocr_summary = extract_summary_table_ocr(doc, reader, page_map)
+            if ocr_summary["총점"] > 0:
+                summary = ocr_summary
+                print("  → [OCR 성공] 종합득점표 점수 추출 완료")
+
     print(f"  → 종합득점표 위치: p{summary['page']}")
     print(f"  → 참여감리원: {summary['참여감리원']}점, 유사용역: {summary['유사용역']}점")
     print(f"  → 기술개발: {summary['기술개발']}점, 업무중첩도: {summary['업무중첩도']}점")
     print(f"  → 교체빈도: {summary['교체빈도']}점, 가감점: {summary['가감점']}점")
     print(f"  → 업체제출 총점: {summary['총점']}")
-
-    # 2.5 페이지 분류 (find_tables 기반 추출용)
-    page_map = classify_pages(doc)
     print(f"  → 페이지 분류: {', '.join(f'{k}:p{v[0]+1}' for k,v in page_map.items() if v)}")
+    _lap("종합득점표 + 페이지분류")
 
     # 3. 참여감리원 자격사항 추출
     print("[3/5] 참여감리원 자격사항 추출 중...")
@@ -2510,14 +2709,16 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
     # 텍스트 추출 실패 시 스캔 PDF OCR 폴백
     if not personnel["책임감리원"]["등급"]:
         print("  → [텍스트 실패] 스캔 PDF OCR 추출 시도")
-        reader = get_reader()
-        scan_result = extract_personnel_scan(doc, reader)
+        if reader is None:
+            reader = get_reader()
+        scan_result = extract_personnel_scan(doc, reader, page_map)
         if scan_result:
             personnel = scan_result
     print(f"  → 책임감리원: {personnel['책임감리원']['성명']} / {personnel['책임감리원']['등급']}")
     if personnel["보조감리원"]:
         print(f"  → 보조감리원: {personnel['보조감리원'][0]['성명']}")
     print(f"  → 비상주감리원: {personnel['비상주감리원']['성명']} / {personnel['비상주감리원']['등급']}")
+    _lap("참여감리원 추출")
 
     # 4. 책임감리원 경력 추출
     print("[4/5] 책임감리원 경력 추출 중...")
@@ -2539,6 +2740,7 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
     if nonres_career is None:
         chief_page = career["page"] - 1 if career["page"] > 0 else 17
         nonres_career = extract_nonres_career(doc, chief_page)
+    _lap("경력 추출 (책임/보조/비상주)")
 
     # 5. 유사용역 실적 추출
     print("[5/5] 유사용역 수행실적 추출 중...")
@@ -2546,6 +2748,8 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
     print(f"  → 적용금액: {similar['적용금액']:,}원")
     if similar["점수"] > 0:
         print(f"  → 평점: {similar['점수']}점")
+
+    _lap("유사용역 추출")
 
     # 5.5 기술개발 세부증빙 추출 (양식2-9)
     print("[5.5/5] 기술개발 세부증빙 추출 중...")
@@ -2559,18 +2763,24 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
     else:
         print("  → 기술개발 페이지 미발견")
 
+    _lap("기술개발 추출")
+
     # 5.7 업무중첩도 세부증빙 추출 (양식2-10)
     print("[5.7/5] 업무중첩도 세부증빙 추출 중...")
     overlap = extract_overlap(doc)
+
+    _lap("업무중첩도 추출")
 
     # 5.9 교체빈도 세부증빙 추출 (양식2-11)
     print("[5.9/5] 교체빈도 세부증빙 추출 중...")
     replacement = extract_replacement(doc)
 
+    _lap("교체빈도 추출")
+
     # 5.95 KEEA 확인서 발급번호 추출 (OCR)
     print("[5.95/5] KEEA 확인서 발급번호 OCR 추출 중...")
     keea_certs = extract_keea_certificates(doc)
-
+    _lap("KEEA 발급번호 OCR")
 
     # 제재내역 추출 (간략)
     sanctions = extract_sanctions(doc)

@@ -534,7 +534,7 @@
     <div class="header">
         <div>
             <h1>배전감리 PQ 심사 교차검증 시스템</h1>
-            <div class="sub">한국전력공사 배전건설부 - 감리용역 적격심사</div>
+            <div class="sub">한국전력공사 경남본부 배전건설부 - 감리용역 적격심사</div>
         </div>
         <span class="badge" title="서버 시작: {{ server_time }}">{{ server_time }}</span>
         <div class="header-buttons">
@@ -549,7 +549,7 @@
             <button class="modal-close" onclick="closeModal('techModal')">&times;</button>
             <h2>기술요약</h2>
             <h3>시스템 개요</h3>
-            <p>본 시스템은 한국전력공사 배전건설부 감리용역 적격심사(PQ) 업무를 지원하기 위한 자동 교차검증 도구입니다.
+            <p>본 시스템은 한국전력공사 경남본부 배전건설부 감리용역 적격심사(PQ) 업무를 지원하기 위한 자동 교차검증 도구입니다.
             업체가 제출한 PDF(사업수행능력 평가서)와 Excel(심사표)을 분석하여 점수를 독립적으로 재계산하고,
             기재값과의 불일치를 자동으로 감지합니다.</p>
 
@@ -686,6 +686,9 @@
                     <option value="10억이상">10억원~50억원 미만</option>
                     <option value="10억미만" selected>10억원 미만</option>
                 </select>
+                <label style="margin-left:16px;cursor:pointer;">
+                    <input type="checkbox" id="skipKeea"> KEEA 진위확인 생략 (빠른 분석)
+                </label>
             </div>
 
             <div class="btn-row">
@@ -774,6 +777,10 @@
 
             <!-- 상세 데이터 (접기) -->
             <details class="detail-toggle">
+                <summary>시스템 로그</summary>
+                <pre id="serverLog" style="background:#1a1a2e;color:#e0e0e0;padding:12px;border-radius:6px;font-size:12px;max-height:400px;overflow-y:auto;white-space:pre-wrap;"></pre>
+            </details>
+            <details class="detail-toggle">
                 <summary>PDF 추출 원본 데이터 (디버깅용)</summary>
                 <pre id="rawPdfData"></pre>
             </details>
@@ -852,6 +859,7 @@
             // 결과 내용 초기화
             document.getElementById('scoreItems').innerHTML = '';
             document.getElementById('detailVerifyBody').innerHTML = '';
+            document.getElementById('serverLog').textContent = '';
             document.getElementById('rawPdfData').textContent = '';
             document.getElementById('rawExcelData').textContent = '';
             document.getElementById('companySelector').style.display = 'none';
@@ -981,6 +989,13 @@
                 alert('PDF 파일을 선택해주세요.\n폴더 선택 또는 개별 파일 선택을 이용하세요.');
                 return;
             }
+            // 폴더명 순번 오름차순 정렬 (예: "186.업체명" → 186)
+            pdfFiles.sort((a, b) => {
+                const fa = getSubFolder(a), fb = getSubFolder(b);
+                const na = fa.match(/^(\d+)/) ? parseInt(fa.match(/^(\d+)/)[1]) : 9999;
+                const nb = fb.match(/^(\d+)/) ? parseInt(fb.match(/^(\d+)/)[1]) : 9999;
+                return na - nb;
+            });
             const btn = document.getElementById('btnAnalyze');
             btn.disabled = true;
             btn.textContent = '분석 중...';
@@ -992,6 +1007,7 @@
             const totalFiles = pdfFiles.length;
             const biddingDate = document.getElementById('biddingDate').value;
             const costTier = document.getElementById('costTier').value;
+            const skipKeea = document.getElementById('skipKeea').checked;
             const allResults = [];
 
             for (let i = 0; i < totalFiles; i++) {
@@ -1007,6 +1023,12 @@
                 formData.append('bidding_date', biddingDate);
                 formData.append('cost_tier', costTier);
                 formData.append('batch_index', i.toString());
+                if (skipKeea) formData.append('skip_keea', '1');
+                // 폴더명에서 순번/업체명, 파일명에서 사업자번호 전달
+                const subFolder = getSubFolder(pdfFiles[i]);
+                if (subFolder) formData.append('folder_name', subFolder);
+                const bizNum = extractBizNum(pdfFiles[i].name);
+                if (bizNum) formData.append('biz_num', bizNum);
 
                 try {
                     const resp = await fetch('/api/analyze', {
@@ -1139,6 +1161,10 @@
             });
             document.getElementById('evalBody').innerHTML = evalHtml;
 
+            // 시스템 로그
+            document.getElementById('serverLog').textContent =
+                successResults.map(r => r.server_log || '').filter(Boolean).join('\n\n');
+
             // 원본 데이터
             document.getElementById('rawPdfData').textContent = JSON.stringify(
                 successResults.map(r => r.pdf_data), null, 2);
@@ -1187,9 +1213,10 @@
             const keea = data.keea_results || [];
             // KEEA 진위확인 결과 요약
             const keeaAllOk = keea.length > 0 && keea.every(c => c.진위확인 === true);
+            // 전원 확인 시에만 소계에 표시, 실패 건은 아래 KEEA 테이블에서 개별 표시
             const keeaNote = keeaAllOk
                 ? '<span style="color:#1565c0;font-weight:600;">KEEA 진위확인 O</span>'
-                : (keea.length > 0 ? '<span style="color:#c62828;">KEEA 진위확인 X</span>' : '');
+                : '';
 
             const BOk   = '<span class="badge-ok">O</span>';
             const BErr  = '<span class="badge-error">X</span>';
@@ -1262,16 +1289,16 @@
             const partComputed = cElec+cF1+cF2 + aElec+aF1+aF2 + nGrade+nElec;
             const partStated   = e.참여감리원_소계 || 0;
 
-            html += makeRow('1. 참여감리원', '50점', '<b>가. 책임감리원</b> (등급)', '-', p.책임_등급||'-', e.책임_등급||'-', vText(p.책임_등급, e.책임_등급), 12, false);
+            html += makeRow('1. 참여감리원', '50점', '<b>가. 책임감리원</b> (등급)', cs.책임_등급_근거||'-', p.책임_등급||'-', e.책임_등급||'-', vText(p.책임_등급, e.책임_등급), 12, false);
             html += addRow('&nbsp;&nbsp;(2) 전기분야 경력', critFmt(cs.책임_전기경력_계산점수, p.책임_전기경력_점수, cs.책임_전기경력_근거), p.책임_전기경력_점수||'-', cElec, vMax(cElec, 10));
             html += addRow('&nbsp;&nbsp;(3-1) 참여분야 경력', critFmt(cs.책임_배전경력1_계산점수, p.책임_배전경력1_점수, cs.책임_배전경력1_근거), p.책임_배전경력1_점수||'-', cF1, vMax(cF1, 10));
             html += addRow('&nbsp;&nbsp;(3-2) 참여분야 경력(감독감리)', critFmt(cs.책임_배전경력2_계산점수, p.책임_배전경력2_점수, cs.책임_배전경력2_근거), p.책임_배전경력2_점수||'-', cF2, vMax(cF2, 5));
-            html += addRow('<b>나. 보조감리원</b> (등급)', '-', p.보조_등급||'-', e.보조1_등급||'-', vText(p.보조_등급, e.보조1_등급));
+            html += addRow('<b>나. 보조감리원</b> (등급)', cs.보조_등급_근거||'-', p.보조_등급||'-', e.보조1_등급||'-', vText(p.보조_등급, e.보조1_등급));
             html += addRow('&nbsp;&nbsp;(2) 전기분야 경력', critFmt(cs.보조_전기경력_계산점수, p.보조_전기경력_점수, cs.보조_전기경력_근거), n(p.보조_전기경력_점수), aElec, vMax(aElec, 6));
             html += addRow('&nbsp;&nbsp;(3-1) 참여분야 경력', critFmt(cs.보조_참여1_계산점수, p.보조_참여분야1_점수, cs.보조_참여1_근거), n(p.보조_참여분야1_점수), aF1, vMax(aF1, 6));
             html += addRow('&nbsp;&nbsp;(3-2) 참여분야 경력(감독감리)', critFmt(cs.보조_참여2_계산점수, p.보조_참여분야2_점수, cs.보조_참여2_근거), n(p.보조_참여분야2_점수), aF2, vMax(aF2, 3));
-            html += addRow('<b>다. 비상주감리원</b> (등급)', critFmt(cs.비상주_등급_계산점수, nGrade, cs.비상주_등급_근거), p.비상주_등급||'-', e.비상주_등급||'-', vText(p.비상주_등급, e.비상주_등급));
-            html += addRow('&nbsp;&nbsp;(1) 등급 점수', '-', n(p.비상주_등급_점수), nGrade, vMax(nGrade, 3));
+            html += addRow('<b>다. 비상주감리원</b> (등급)', cs.비상주_등급_근거||'-', p.비상주_등급||'-', e.비상주_등급||'-', vText(p.비상주_등급, e.비상주_등급));
+            html += addRow('&nbsp;&nbsp;(1) 등급 점수', critFmt(cs.비상주_등급_계산점수, p.비상주_등급_점수, cs.비상주_등급_근거), n(p.비상주_등급_점수), nGrade, vMax(nGrade, 3));
             html += addRow('&nbsp;&nbsp;(2) 전기분야 경력', critFmt(cs.비상주_전기경력_계산점수, p.비상주_전기경력_점수, cs.비상주_전기경력_근거), n(p.비상주_전기경력_점수), nElec, vMax(nElec, 7));
             html += addRow('소계', '-', n(p.참여감리원_소계), partStated, vSum(partComputed, partStated, 50), true);
 
