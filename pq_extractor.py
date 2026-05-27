@@ -652,11 +652,15 @@ def _extract_from_page_items(items, page_num):
         if role == '책임':
             personnel["책임감리원"]["성명"] = name
             personnel["책임감리원"]["등급"] = grade
+            personnel["책임감리원"]["전기경력_개월"] = elec_months
+            personnel["책임감리원"]["참여경력_개월"] = field_months
         elif role == '보조':
-            personnel["보조감리원"].append({"성명": name, "등급": grade, "경력일수": ""})
+            personnel["보조감리원"].append({"성명": name, "등급": grade, "경력일수": "",
+                                         "전기경력_개월": elec_months})
         elif role == '비상주':
             personnel["비상주감리원"]["성명"] = name
             personnel["비상주감리원"]["등급"] = grade
+            personnel["비상주감리원"]["전기경력_개월"] = elec_months
 
         print(f"    [scan] {role}: {name}/{grade}, 전기={elec_years}년({elec_months}월)")
 
@@ -2741,6 +2745,16 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
     if career is None:
         print("  → [v2 실패] 기존 방식으로 폴백")
         career = extract_career_summary(doc)
+    # 경력 텍스트 추출 실패 시: 참여감리원 OCR 데이터에서 경력 보충
+    if career['책임_전기분야_개월'] == 0:
+        scan_months = personnel["책임감리원"].get("전기경력_개월", 0)
+        if scan_months > 0:
+            career['책임_전기분야_개월'] = scan_months
+            career['책임_전기분야_년'] = round(scan_months / 12, 2)
+            s, _ = calc_career_score(career['책임_전기분야_년'], "책임_전기")
+            career['책임_전기분야_점수'] = s
+            print(f"  → [OCR 폴백] 전기분야: {career['책임_전기분야_년']}년 → {career['책임_전기분야_점수']}점")
+
     print(f"  → 전기분야: {career['책임_전기분야_년']}년 → {career['책임_전기분야_점수']}점")
     print(f"  → 참여분야(전체): {career['책임_참여분야1_년']}년 → {career['책임_참여분야1_점수']}점")
     print(f"  → 참여분야(감독감리): {career['책임_참여분야2_년']}년 → {career['책임_참여분야2_점수']}점")
@@ -2755,6 +2769,27 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
     if nonres_career is None:
         chief_page = career["page"] - 1 if career["page"] > 0 else 17
         nonres_career = extract_nonres_career(doc, chief_page)
+
+    # 보조/비상주 경력도 OCR 폴백
+    if asst_career['보조_전기분야_년'] == 0 and personnel["보조감리원"]:
+        scan_months = personnel["보조감리원"][0].get("전기경력_개월", 0)
+        if scan_months > 0:
+            asst_career['보조_전기분야_년'] = round(scan_months / 12, 2)
+            s, _ = calc_career_score(asst_career['보조_전기분야_년'], "보조_전기")
+            asst_career['보조_전기분야_점수'] = s
+            print(f"  → [OCR 폴백] 보조 전기분야: {asst_career['보조_전기분야_년']}년 → {s}점")
+    if nonres_career['비상주_전기분야_년'] == 0:
+        scan_months = personnel["비상주감리원"].get("전기경력_개월", 0)
+        if scan_months > 0:
+            nonres_career['비상주_전기분야_년'] = round(scan_months / 12, 2)
+            s, _ = calc_career_score(nonres_career['비상주_전기분야_년'], "비상주_전기")
+            nonres_career['비상주_전기분야_점수'] = s
+            print(f"  → [OCR 폴백] 비상주 전기분야: {nonres_career['비상주_전기분야_년']}년 → {s}점")
+    # 비상주 등급 점수 OCR 폴백 (경력 양식 미추출 시 personnel 등급으로 계산)
+    if nonres_career['비상주_등급_점수'] == 0 and personnel["비상주감리원"]["등급"]:
+        grade = personnel["비상주감리원"]["등급"]
+        nonres_career['비상주_등급_점수'] = 3.0 if grade == '특급' else 2.0
+        print(f"  → [OCR 폴백] 비상주 등급: {grade} → {nonres_career['비상주_등급_점수']}점")
     _lap("경력 추출 (책임/보조/비상주)")
 
     # 5. 유사용역 실적 추출
