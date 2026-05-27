@@ -1244,13 +1244,13 @@ def _parse_summary_page_ocr(doc, reader, pn):
     # ─── 섹션 마커(가~아)로 카테고리 y범위 결정 ───
     SECTION_MAP = [
         ('가', '참여감리원', ['참여감리원']),
-        ('나', '유사용역', ['유사용역']),
-        ('다', '신용도', ['신용도', '신 용 도']),
-        ('라', '기술개발', ['기술개발']),
+        ('나', '유사용역', ['유사용역', '유사용억']),
+        ('다', '신용도', ['신용도', '신 용 도', '신용']),
+        ('라', '기술개발', ['기술개발', '기술기발', '투자실적']),
         ('마', '업무중첩도', ['업무중첩도', '업무중청도', '중첩도', '업무중첩']),
-        ('바', '교체빈도', ['교체빈도', '교체반도']),
+        ('바', '교체빈도', ['교체빈도', '교체반도', '교체빈']),
         ('사', '작업계획', ['작업계획']),
-        ('아', '가감점', ['가점', '가감점']),
+        ('아', '가감점', ['가점', '가감점', '감점']),
     ]
 
     section_ys = []
@@ -1272,6 +1272,7 @@ def _parse_summary_page_ocr(doc, reader, pn):
         cat_ranges[cat] = (y_lo, y_hi)
 
     # ─── 합계 행에서 총점 추출 ───
+    # 방법1: "합 계" 키워드로 찾기
     for y_, x_, text_, conf_ in items:
         clean = text_.replace(' ', '')
         if ('합계' in clean or ('합' in text_ and '계' in text_)) and '소' not in clean and x_ < 500:
@@ -1283,6 +1284,20 @@ def _parse_summary_page_ocr(doc, reader, pn):
                         if 50 <= val <= 120:
                             result["총점"] = val
             break
+
+    # 방법2 (fallback): "합계" 키워드 없으면 배점=100 행에서 총점 추출
+    if result["총점"] == 0:
+        for y_, x_, text_, conf_ in reversed(items):
+            if text_ == '100' and x_ > 650:
+                for y2, x2, t2, c2 in items:
+                    if abs(y2 - y_) < 30 and x2 != x_ and x2 > 650:
+                        m = re.match(r'^(\d+\.?\d*)$', t2)
+                        if m:
+                            val = float(m.group(1))
+                            if 50 <= val <= 120:
+                                result["총점"] = val
+                if result["총점"] > 0:
+                    break
 
     # ─── 각 섹션의 평점 컬럼 합산 (x클러스터링) ───
     ALLOC_MAP = {"참여감리원": 50, "유사용역": 10, "신용도": 10, "기술개발": 10,
