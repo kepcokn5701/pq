@@ -374,7 +374,7 @@ _vision_cache = {}  # (doc_id, page_num, prompt_key) → text
 
 
 def _check_vision_llm():
-    """Vision LLM 서버 접속 확인 및 모델명 캐시"""
+    """Vision LLM 서버 접속 확인 및 비전 모델명 캐시"""
     global _vision_model_name, _vision_available
     if _vision_available is not None:
         return _vision_available
@@ -382,10 +382,19 @@ def _check_vision_llm():
         resp = _requests.get(f"{VISION_LLM_URL}/v1/models", timeout=5)
         if resp.status_code == 200:
             models = resp.json().get("data", [])
+            # 비전(VL) 모델 우선 탐색
+            for m in models:
+                mid = m.get("id", "")
+                if "vl" in mid.lower() or "vision" in mid.lower():
+                    _vision_model_name = mid
+                    _vision_available = True
+                    print(f"  [Vision LLM] 연결 성공: {_vision_model_name}")
+                    return True
+            # VL 모델 없으면 첫 번째 모델 사용
             if models:
                 _vision_model_name = models[0]["id"]
                 _vision_available = True
-                print(f"  [Vision LLM] 연결 성공: {_vision_model_name}")
+                print(f"  [Vision LLM] 연결 성공 (VL 모델 없음, 대체): {_vision_model_name}")
                 return True
     except Exception:
         pass
@@ -467,32 +476,92 @@ def vision_ocr_page(doc, page_num, prompt=None, zoom=2.0):
 
 
 def vision_classify_header(doc, page_num):
-    """Vision LLM으로 페이지 상단의 양식 번호 식별
+    """Vision LLM으로 페이지 상단 25%만 크롭하여 양식 번호 식별
 
+    전체 페이지 대신 헤더만 전송 → 속도 4배 향상.
     Returns: Vision LLM 응답 문자열 (양식 번호 포함) 또는 빈 문자열
     """
+    if not _check_vision_llm():
+        return ""
+    if page_num >= doc.page_count:
+        return ""
+
+    cache_key = (id(doc), page_num, "_header_classify_")
+    if cache_key in _vision_cache:
+        return _vision_cache[cache_key]
+
+    # 상단 25%만 크롭
+    page = doc[page_num]
+    zoom = 1.5
+    full_rect = page.rect
+    header_rect = fitz.Rect(full_rect.x0, full_rect.y0,
+                            full_rect.x1, full_rect.y0 + full_rect.height * 0.25)
+    clip_mat = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=clip_mat, clip=header_rect)
+    img_bytes = pix.tobytes("png")
+    img_b64 = base64.b64encode(img_bytes).decode("ascii")
+    del pix, img_bytes
+
     prompt = (
-        "이 문서 페이지 상단에 있는 양식 번호를 알려주세요. "
-        "예: '양식2-3', '양식2-4', '양식2-5', '양식2-6', '양식2-9', '양식2-10', '양식2-11'. "
-        "양식 번호가 없으면 '없음'이라고만 답하세요. "
-        "양식2-5인 경우 '책임감리원', '보조감리원', '비상주감리원' 중 어느 것인지도 함께 답하세요. "
-        "양식 번호와 세부구분만 간결하게 답하세요."
+        "이 PQ 적격심사 문서 페이지를 분류해주세요. 다음 중 하나로만 답하세요:\n"
+        "- '종합득점표' : 업체 총점/합계표\n"
+        "- '참여감리원' : 감리원 명단, 등급(특급/고급/중급), 경력, 자격증\n"
+        "- '경력_책임' : 책임감리원 경력 세부\n"
+        "- '경력_보조' : 보조감리원 경력 세부\n"
+        "- '경력_비상주' : 비상주감리원 경력 세부\n"
+        "- '유사용역' : 유사용역 실적, 사정금액\n"
+        "- '기술개발' : 기술개발 투자실적, 특허, 실용신안\n"
+        "- '업무중첩도' : 업무중첩도, 동시수행\n"
+        "- '교체빈도' : 교체빈도, 감리원 교체\n"
+        "- '없음' : 위 항목에 해당하지 않음\n"
+        "한 단어로만 답하세요."
     )
-    return vision_ocr_page(doc, page_num, prompt=prompt, zoom=1.5)
+
+    payload = {
+        "model": _vision_model_name,
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+            {"type": "text", "text": prompt},
+        ]}],
+        "max_tokens": 50,
+        "temperature": 0.0,
+    }
+
+    try:
+        resp = _requests.post(
+            f"{VISION_LLM_URL}/v1/chat/completions",
+            json=payload, timeout=60
+        )
+        del img_b64
+        if resp.status_code == 200:
+            text = resp.json()["choices"][0]["message"]["content"]
+            _vision_cache[cache_key] = text
+            return text
+    except Exception as e:
+        print(f"  [Vision] p{page_num+1} 헤더 분류 실패: {e}")
+
+    return ""
 
 
 ###############################################################################
 # 텍스트 추출: PyMuPDF 우선 → Vision LLM → EasyOCR 폴백
 ###############################################################################
 
+# 스캔 PDF 여부 플래그 — True일 때만 Vision LLM/EasyOCR 폴백 활성화
+_use_ocr_fallback = False
+
+
 def get_page_text(doc, page_num):
-    """페이지 텍스트 추출 (PyMuPDF → Vision LLM → EasyOCR 순서 폴백)"""
+    """페이지 텍스트 추출 (PyMuPDF 우선, 스캔 PDF일 때만 OCR 폴백)"""
     if page_num >= doc.page_count:
         return ""
     page = doc[page_num]
     text = page.get_text()
     if text and len(text.strip()) > 20:
         return text
+    # OCR 폴백은 스캔 PDF로 판정된 경우에만 사용
+    if not _use_ocr_fallback:
+        return text if text else ""
     # 1차 폴백: Vision LLM (고정밀)
     vision_text = vision_ocr_page(doc, page_num)
     if vision_text:
@@ -531,26 +600,63 @@ def classify_pages(doc):
     Returns: {"양식2-4": [16], "양식2-5_책임": [20], ...}
     """
     page_map = {}
-    # 우선순위 순서: 고유 식별자가 있는 양식 먼저 매칭
+    # 우선순위 순서: 종합득점표 먼저 매칭 → 세부 양식
+    # 각 규칙은 OR 관계의 키워드 세트 목록 (세트 내부는 AND)
     FORM_RULES = [
-        ("양식2-3", [["종합득점표"], ["양식2-3"]]),
-        ("양식2-4", [["양식2-4"], ["참여감리원", "자격사항", "자격등급"], ["참여감리원", "책임감리원", "보조감리원"]]),
-        ("양식2-5_책임", [["양식2-5", "1. 책임감리원"], ["양식2-5", "책임감리원"]]),
-        ("양식2-5_보조", [["양식2-5", "2. 보조감리원"], ["양식2-5", "보조감리원"]]),
-        ("양식2-5_비상주", [["3. 비상주감리원"], ["양식2-5", "비상주감리원"]]),
-        ("양식2-6", [["유사용역", "환산금액"], ["양식2-6"]]),
-        ("양식2-9", [["양식2-9"], ["기술개발투자실적"]]),
-        ("양식2-10", [["양식2-10"], ["업무중첩도", "배치현황"]]),
-        ("양식2-11", [["양식2-11", "교체빈도"]]),
+        # 종합득점표를 가장 먼저 매칭하여 다른 양식과의 오매칭 방지
+        # 데이터 페이지도 인식: 배점+합계+여러 심사항목 키워드 동시 존재
+        ("양식2-3", [["종합득점표"], ["양식2-3"],
+                     ["배점", "합계", "참여감리원", "유사용역"],
+                     ["배점", "합계", "기술개발", "교체빈도"]]),
+        # 참여감리원 — 양식번호 없어도 내용으로 매칭
+        ("양식2-4", [["양식2-4"], ["참여감리원", "자격사항", "자격등급"],
+                     ["참여감리원", "책임감리원", "보조감리원"],
+                     ["참여감리원", "특급"], ["참여감리원", "고급"],
+                     ["참여감리원", "등급"]]),
+        # 경력 세부 — 양식번호 없으면 "X. 책임/보조/비상주" 패턴으로 매칭
+        ("양식2-5_책임", [["양식2-5", "1. 책임감리원"], ["양식2-5", "책임감리원"],
+                         ["1. 책임감리원", "경력"]]),
+        ("양식2-5_보조", [["양식2-5", "2. 보조감리원"], ["양식2-5", "보조감리원"],
+                         ["2. 보조감리원", "경력"]]),
+        ("양식2-5_비상주", [["3. 비상주감리원"], ["양식2-5", "비상주감리원"],
+                           ["비상주감리원", "경력", "등급"]]),
+        # 유사용역 — "환산금액" 또는 "용역금액" 단독 매칭 가능
+        ("양식2-6", [["유사용역", "환산금액"], ["양식2-6"],
+                     ["유사용역", "사정금액"], ["유사용역", "용역금액"],
+                     ["환산금액", "사정금액"]]),
+        # 기술개발 — 넓은 매칭
+        ("양식2-9", [["양식2-9"], ["기술개발투자실적"],
+                     ["특허", "유효기간"], ["실용신안", "유효기간"],
+                     ["기술투자", "매출액"], ["(A)", "(B)", "매출"]]),
+        # 업무중첩도 — 단독 키워드 가능 (종합득점표에서 이미 걸러짐)
+        ("양식2-10", [["양식2-10"], ["업무중첩도", "배치현황"],
+                      ["업무중첩도", "동시수행"], ["업무중첩도", "해당"]]),
+        # 교체빈도 — 단독 키워드 가능
+        ("양식2-11", [["양식2-11", "교체빈도"], ["양식2-11"],
+                      ["교체빈도", "교체율"], ["교체빈도", "해당"]]),
     ]
+    # 1차: 종합득점표 페이지 선제 식별
+    summary_pages = set()
     for pn in range(doc.page_count):
         text = doc[pn].get_text()
         if not text.strip():
             continue
-        for form_id, keyword_sets in FORM_RULES:
+        summary_rules = FORM_RULES[0][1]  # 양식2-3 규칙
+        if any(all(kw in text for kw in kws) for kws in summary_rules):
+            page_map.setdefault("양식2-3", []).append(pn)
+            summary_pages.add(pn)
+
+    # 2차: 나머지 양식 매칭 (종합득점표/표지 페이지 제외, 중복 매칭 허용)
+    for pn in range(doc.page_count):
+        if pn in summary_pages:
+            continue
+        text = doc[pn].get_text()
+        if len(text.strip()) < 100:  # 표지·목차 등 짧은 페이지 제외
+            continue
+        for form_id, keyword_sets in FORM_RULES[1:]:
             if any(all(kw in text for kw in kws) for kws in keyword_sets):
                 page_map.setdefault(form_id, []).append(pn)
-                break
+                # break 없음 — 한 페이지가 여러 양식에 매칭 가능
     return page_map
 
 
@@ -649,7 +755,10 @@ def classify_pages_vision(doc):
     scan_pages = list(range(front_end)) + list(range(back_start, doc.page_count))
 
     vision_count = 0
-    max_vision = 60
+    max_vision = 40
+    last_found_form = None
+
+    print(f"  [Vision] 페이지 분류 시작 ({len(scan_pages)}p 대상, 최대 {max_vision}회)")
 
     for pn in scan_pages:
         if vision_count >= max_vision:
@@ -663,30 +772,32 @@ def classify_pages_vision(doc):
 
         header = vision_classify_header(doc, pn)
         vision_count += 1
+        if vision_count % 5 == 0:
+            print(f"    [Vision] {vision_count}회 완료 (p{pn+1})")
 
         if not header or '없음' in header:
             continue
 
-        # 양식 번호 매핑
+        # 내용 기반 매핑 (양식 번호가 없는 PDF도 대응)
+        h = header.lower().strip()
         form_id = None
-        if '양식2-3' in header or '종합득점표' in header:
+        if '종합득점' in h or '양식2-3' in h:
             form_id = '양식2-3'
-        elif '양식2-11' in header or '교체빈도' in header:
+        elif '교체빈도' in h or '양식2-11' in h:
             form_id = '양식2-11'
-        elif '양식2-10' in header or '업무중첩도' in header:
+        elif '업무중첩' in h or '양식2-10' in h:
             form_id = '양식2-10'
-        elif '양식2-9' in header or '기술개발' in header:
+        elif '기술개발' in h or '양식2-9' in h:
             form_id = '양식2-9'
-        elif '양식2-6' in header or '유사용역' in header:
+        elif '유사용역' in h or '양식2-6' in h:
             form_id = '양식2-6'
-        elif '양식2-5' in header or '경력실적' in header:
-            if '책임' in header:
-                form_id = '양식2-5_책임'
-            elif '보조' in header:
-                form_id = '양식2-5_보조'
-            elif '비상주' in header:
-                form_id = '양식2-5_비상주'
-        elif '양식2-4' in header or ('참여감리원' in header and '자격' in header):
+        elif '경력_책임' in h or ('양식2-5' in h and '책임' in h):
+            form_id = '양식2-5_책임'
+        elif '경력_보조' in h or ('양식2-5' in h and '보조' in h):
+            form_id = '양식2-5_보조'
+        elif '경력_비상주' in h or ('양식2-5' in h and '비상주' in h):
+            form_id = '양식2-5_비상주'
+        elif '참여감리원' in h or '양식2-4' in h:
             form_id = '양식2-4'
 
         if form_id:
@@ -2988,6 +3099,14 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
     page_map = classify_pages(doc)
     is_scan_pdf = len(page_map) < 3  # 양식을 3개 미만으로 찾으면 스캔 PDF 의심
     reader = None
+
+    # 스캔 PDF일 때만 OCR 폴백 활성화 (텍스트 내장 PDF는 Vision LLM 불필요)
+    global _use_ocr_fallback
+    _use_ocr_fallback = is_scan_pdf
+    if is_scan_pdf:
+        print(f"  → 스캔 PDF 감지 (page_map {len(page_map)}개) — OCR 폴백 활성화")
+    else:
+        print(f"  → 텍스트 PDF 감지 (page_map {len(page_map)}개) — OCR 폴백 비활성화")
 
     # 종합득점표 텍스트 추출 실패 시 OCR 폴백 (총점 0이면 항상 시도)
     if summary["총점"] == 0:
