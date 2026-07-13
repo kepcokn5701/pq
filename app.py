@@ -11,6 +11,7 @@ import json
 import shutil
 import logging
 import traceback
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -42,6 +43,39 @@ SERVER_START_TIME = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 # 최근 분석 결과 저장 (세션 대용)
 _last_result = {}
 _batch_results = []  # 일괄 분석 결과 (여러 업체)
+
+###############################################################################
+# 실시간 로그 캡처 (print() 출력 → 웹 대시보드 전달)
+###############################################################################
+_log_lines = []
+_log_lock = threading.Lock()
+
+
+class _StdoutCapture:
+    """sys.stdout을 가로채서 로그 버퍼에 저장 + 원본 콘솔 출력 유지"""
+    def __init__(self, original):
+        self.original = original
+        self.encoding = getattr(original, 'encoding', 'utf-8')
+
+    def write(self, text):
+        self.original.write(text)
+        if text.strip():
+            with _log_lock:
+                for line in text.split('\n'):
+                    if line.strip():
+                        _log_lines.append(line)
+
+    def flush(self):
+        self.original.flush()
+
+    def reconfigure(self, **kwargs):
+        if hasattr(self.original, 'reconfigure'):
+            self.original.reconfigure(**kwargs)
+        self.encoding = kwargs.get('encoding', self.encoding)
+
+
+# stdout 캡처 설치
+sys.stdout = _StdoutCapture(sys.stdout)
 
 
 ###############################################################################
@@ -850,15 +884,26 @@ def index():
     return render_template('index.html', server_time=SERVER_START_TIME)
 
 
+@app.route('/api/logs')
+def api_logs():
+    """실시간 로그 폴링 — since 파라미터 이후의 새 로그 반환"""
+    since = request.args.get('since', 0, type=int)
+    with _log_lock:
+        new_lines = _log_lines[since:]
+        return jsonify({'lines': new_lines, 'total': len(_log_lines)})
+
+
 @app.route('/api/analyze', methods=['POST'])
 def api_analyze():
     """PDF + Excel 업로드 → 분석 → 교차검증 결과 JSON"""
     global _last_result, _batch_results
 
-    # 첫 업체 분석 시 배치 초기화
+    # 첫 업체 분석 시 배치 + 로그 초기화
     is_batch_start = request.form.get('batch_index', '')
     if is_batch_start == '0':
         _batch_results = []
+        with _log_lock:
+            _log_lines.clear()
 
     pdf_file = request.files.get('pdf_file')
     excel_file = request.files.get('excel_file')
@@ -949,17 +994,20 @@ def api_analyze():
         if fn_match:
             file_company = fn_match.group(1).strip()
         company_name = pdf_company or excel_data.get("업체명", "") or folder_company or file_company
+        # eval_data: PDF 추출값만 사용 (Excel 폴백 제거)
+        # criteria_scores에 독립 계산값이 있으면 그것을 우선 사용
+        cs = pdf_data.get("criteria_scores", {})
         eval_data = {
             "업체명": company_name,
             "사업자번호": biz_num,
             "순번": folder_order,
-            "참여감리원_점수": pdf_data.get("참여감리원_소계", 0) or excel_data.get("참여감리원_소계", 0),
-            "유사용역_점수": pdf_data.get("유사용역_점수", 0) or excel_data.get("유사용역_점수", 0),
-            "기술개발_점수": pdf_data.get("기술개발_점수", 0) or excel_data.get("기술개발_점수", 0),
-            "업무중첩_점수": pdf_data.get("업무중첩_점수", 0) or excel_data.get("업무중첩_점수", 0),
-            "교체빈도_점수": pdf_data.get("교체빈도_점수", 0) or excel_data.get("교체빈도_점수", 0),
-            "가감점": pdf_data.get("가점_자격증", 0) or (excel_data.get("가점_자격증", 0) - excel_data.get("부실벌점", 0)),
-            "총점": pdf_data.get("업체제출_총점", 0) or excel_data.get("총점", 0),
+            "참여감리원_점수": pdf_data.get("참여감리원_소계", 0),
+            "유사용역_점수": pdf_data.get("유사용역_점수", 0),
+            "기술개발_점수": pdf_data.get("기술개발_점수", 0),
+            "업무중첩_점수": pdf_data.get("업무중첩_점수", 0),
+            "교체빈도_점수": pdf_data.get("교체빈도_점수", 0),
+            "가감점": pdf_data.get("가점_자격증", 0),
+            "총점": pdf_data.get("업체제출_총점", 0),
         }
 
         # pdf_data 업체명도 보정 (상세 결과 표시용)

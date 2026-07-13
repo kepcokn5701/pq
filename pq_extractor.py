@@ -11,6 +11,7 @@ import sys
 import os
 import re
 import json
+import base64
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -20,6 +21,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 # PDF/OCR
 import fitz  # PyMuPDF
 import easyocr
+import requests as _requests
 
 # Excel
 import openpyxl
@@ -30,6 +32,9 @@ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 ###############################################################################
 BIDDING_DATE = "2026-03-09"  # 입찰공고일 (기본값)
 COST_TIER = "10억미만"  # 총 예정전기공사비 구간
+
+# Vision LLM 서버 (GPU PC에서 vLLM + Qwen2.5-VL 구동)
+VISION_LLM_URL = "http://10.193.5.118:8080"
 
 ###############################################################################
 # 경력 점수 기준표 (공사비 구간 + 등급 기반)
@@ -315,25 +320,186 @@ def ocr_page(doc, page_num, zoom=1.5):
 
 
 def ocr_page_text(doc, page_num, zoom=1.5):
-    """페이지의 전체 텍스트를 하나의 문자열로 반환"""
+    """페이지의 전체 텍스트를 하나의 문자열로 반환 (공백 구분)"""
     results = ocr_page(doc, page_num, zoom)
     return ' '.join([text for (text, conf, bbox) in results])
 
 
+def ocr_page_to_lines(doc, page_num, zoom=1.5):
+    """OCR 결과를 y좌표 기준으로 줄 단위로 그룹화하여 반환
+
+    EasyOCR bbox: [[x1,y1],[x2,y1],[x2,y2],[x1,y2]]
+    같은 y좌표(±threshold) 항목을 한 줄로 합치고, x좌표 순 정렬.
+    """
+    items = ocr_page(doc, page_num, zoom)
+    if not items:
+        return []
+    # (y_mid, x_left, text) 튜플 목록
+    positioned = []
+    for text, conf, bbox in items:
+        y_mid = (bbox[0][1] + bbox[2][1]) / 2
+        x_left = bbox[0][0]
+        positioned.append((y_mid, x_left, text))
+    positioned.sort()
+
+    lines = []
+    current_line = []
+    current_y = None
+    y_threshold = 15  # 같은 줄 판정 픽셀 차이
+
+    for y_mid, x_left, text in positioned:
+        if current_y is None or abs(y_mid - current_y) > y_threshold:
+            if current_line:
+                current_line.sort(key=lambda x: x[0])
+                lines.append(' '.join(t for _, t in current_line))
+            current_line = [(x_left, text)]
+            current_y = y_mid
+        else:
+            current_line.append((x_left, text))
+
+    if current_line:
+        current_line.sort(key=lambda x: x[0])
+        lines.append(' '.join(t for _, t in current_line))
+
+    return lines
+
+
 ###############################################################################
-# 텍스트 추출: PyMuPDF 우선 → OCR 폴백
+# Vision LLM (Qwen2.5-VL via vLLM) — 스캔 PDF 고정밀 텍스트 추출
+###############################################################################
+
+_vision_model_name = None
+_vision_available = None  # None=미확인, True/False
+_vision_cache = {}  # (doc_id, page_num, prompt_key) → text
+
+
+def _check_vision_llm():
+    """Vision LLM 서버 접속 확인 및 모델명 캐시"""
+    global _vision_model_name, _vision_available
+    if _vision_available is not None:
+        return _vision_available
+    try:
+        resp = _requests.get(f"{VISION_LLM_URL}/v1/models", timeout=5)
+        if resp.status_code == 200:
+            models = resp.json().get("data", [])
+            if models:
+                _vision_model_name = models[0]["id"]
+                _vision_available = True
+                print(f"  [Vision LLM] 연결 성공: {_vision_model_name}")
+                return True
+    except Exception:
+        pass
+    _vision_available = False
+    print(f"  [Vision LLM] 서버 접속 불가 ({VISION_LLM_URL}) → EasyOCR 폴백")
+    return False
+
+
+def vision_ocr_page(doc, page_num, prompt=None, zoom=2.0):
+    """Vision LLM으로 페이지 전체 텍스트 추출 (표 구조 유지)
+
+    Args:
+        doc: fitz.Document
+        page_num: 0-indexed page number
+        prompt: 커스텀 프롬프트 (None이면 기본 텍스트 추출)
+        zoom: 이미지 해상도 배율
+    Returns:
+        추출된 텍스트 문자열 (실패 시 빈 문자열)
+    """
+    if not _check_vision_llm():
+        return ""
+    if page_num >= doc.page_count:
+        return ""
+
+    prompt_key = prompt[:50] if prompt else "_default_"
+    cache_key = (id(doc), page_num, prompt_key)
+    if cache_key in _vision_cache:
+        return _vision_cache[cache_key]
+
+    # 페이지 → PNG 이미지
+    page = doc[page_num]
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+    img_bytes = pix.tobytes("png")
+    img_b64 = base64.b64encode(img_bytes).decode("ascii")
+    del pix, img_bytes
+
+    if prompt is None:
+        prompt = (
+            "이 문서 페이지의 모든 텍스트를 정확히 추출해주세요. "
+            "표가 있으면 각 행을 한 줄로, 셀은 | 로 구분하세요. "
+            "숫자·날짜·이름 등을 정확히 옮기고, 설명이나 해석은 하지 마세요."
+        )
+
+    payload = {
+        "model": _vision_model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+        "max_tokens": 4096,
+        "temperature": 0.0,
+    }
+
+    try:
+        resp = _requests.post(
+            f"{VISION_LLM_URL}/v1/chat/completions",
+            json=payload,
+            timeout=120,
+        )
+        del img_b64
+        if resp.status_code == 200:
+            text = resp.json()["choices"][0]["message"]["content"]
+            _vision_cache[cache_key] = text
+            return text
+        else:
+            print(f"  [Vision LLM] p{page_num+1} 오류: HTTP {resp.status_code}")
+    except Exception as e:
+        print(f"  [Vision LLM] p{page_num+1} 호출 실패: {e}")
+
+    return ""
+
+
+def vision_classify_header(doc, page_num):
+    """Vision LLM으로 페이지 상단의 양식 번호 식별
+
+    Returns: Vision LLM 응답 문자열 (양식 번호 포함) 또는 빈 문자열
+    """
+    prompt = (
+        "이 문서 페이지 상단에 있는 양식 번호를 알려주세요. "
+        "예: '양식2-3', '양식2-4', '양식2-5', '양식2-6', '양식2-9', '양식2-10', '양식2-11'. "
+        "양식 번호가 없으면 '없음'이라고만 답하세요. "
+        "양식2-5인 경우 '책임감리원', '보조감리원', '비상주감리원' 중 어느 것인지도 함께 답하세요. "
+        "양식 번호와 세부구분만 간결하게 답하세요."
+    )
+    return vision_ocr_page(doc, page_num, prompt=prompt, zoom=1.5)
+
+
+###############################################################################
+# 텍스트 추출: PyMuPDF 우선 → Vision LLM → EasyOCR 폴백
 ###############################################################################
 
 def get_page_text(doc, page_num):
-    """페이지 텍스트 추출 (PyMuPDF 내장 텍스트 우선, 부족하면 OCR 폴백)"""
+    """페이지 텍스트 추출 (PyMuPDF → Vision LLM → EasyOCR 순서 폴백)"""
     if page_num >= doc.page_count:
         return ""
     page = doc[page_num]
     text = page.get_text()
     if text and len(text.strip()) > 20:
         return text
-    # 텍스트가 없거나 부족하면 OCR 폴백
-    return ocr_page_text(doc, page_num)
+    # 1차 폴백: Vision LLM (고정밀)
+    vision_text = vision_ocr_page(doc, page_num)
+    if vision_text:
+        return vision_text
+    # 2차 폴백: EasyOCR (저정밀)
+    lines = ocr_page_to_lines(doc, page_num)
+    return '\n'.join(lines)
 
 
 def get_page_lines(doc, page_num):
@@ -400,33 +566,32 @@ def classify_pages_ocr(doc, reader):
     page_map = {}
     FORM_RULES = [
         ("양식2-3", [["종합득점표"], ["양식2-3"]]),
-        ("양식2-4", [["양식2-4"], ["참여감리원", "자격사항"]]),
-        ("양식2-5_책임", [["양식2-5", "책임감리원"]]),
-        ("양식2-5_보조", [["양식2-5", "보조감리원"]]),
-        ("양식2-5_비상주", [["비상주감리원"], ["양식2-5", "비상주"]]),
-        ("양식2-6", [["유사용역", "환산"], ["양식2-6"]]),
-        ("양식2-9", [["양식2-9"], ["기술개발투자실적"], ["기술개발", "투자실적"]]),
-        ("양식2-10", [["양식2-10"], ["업무중첩도", "배치"]]),
-        ("양식2-11", [["양식2-11", "교체빈도"]]),
+        ("양식2-4", [["양식2-4"], ["참여감리원", "자격사항"], ["참여감리원", "책임감리원", "보조감리원"]]),
+        ("양식2-5_책임", [["양식2-5", "책임감리원"], ["1. 책임감리원", "경력"]]),
+        ("양식2-5_보조", [["양식2-5", "보조감리원"], ["2. 보조감리원", "경력"]]),
+        ("양식2-5_비상주", [["비상주감리원", "경력"], ["양식2-5", "비상주"], ["3. 비상주감리원"]]),
+        ("양식2-6", [["유사용역", "환산"], ["양식2-6"], ["유사용억", "환산"]]),
+        ("양식2-9", [["양식2-9"], ["기술개발투자실적"], ["기술개발", "투자실적"], ["기술기발", "투자실적"]]),
+        ("양식2-10", [["양식2-10"], ["업무중첩도", "배치"], ["업무중첩도"]]),
+        ("양식2-11", [["양식2-11", "교체빈도"], ["양식2-11"], ["교체빈도율"], ["교체반도율"]]),
     ]
 
     required_forms = {r[0] for r in FORM_RULES}
-    max_ocr = 30  # 최대 OCR 횟수 (약 90초 제한)
+    max_ocr = 80  # 최대 OCR 횟수 (상단25% ~2초/회)
     ocr_count = 0
-    # 양식은 보통 앞쪽 60%에 집중 (뒤쪽은 증빙첨부)
-    max_page = min(int(doc.page_count * 0.6), doc.page_count)
 
-    for pn in range(max_page):
-        if ocr_count >= max_ocr:
-            print(f"    [OCR] 최대 {max_ocr}회 도달, 탐색 중단")
-            break
-        # 내장 텍스트가 있으면 건너뜀 (이미 classify_pages()로 처리됨)
+    # 양방향 스캔: 앞쪽 30% + 뒤쪽 40% (중간은 증빙첨부 구간)
+    front_end = min(int(doc.page_count * 0.3), doc.page_count)
+    back_start = max(int(doc.page_count * 0.55), front_end)
+    scan_pages = list(range(front_end)) + list(range(back_start, doc.page_count))
+
+    def _ocr_header(pn):
+        """페이지 상단 25% OCR → 텍스트 반환"""
+        nonlocal ocr_count
         if len(doc[pn].get_text().strip()) > 100:
-            continue
-
+            return None  # 내장 텍스트 있으면 스킵
         page = doc[pn]
         rect = page.rect
-        # 상단 25%만 크롭하여 OCR → 속도 최적화
         clip = fitz.Rect(rect.x0, rect.y0, rect.x1, rect.y0 + rect.height * 0.25)
         pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), clip=clip)
         img_data = pix.tobytes('png')
@@ -434,6 +599,18 @@ def classify_pages_ocr(doc, reader):
         header_text = ' '.join([t for _, t, _ in results])
         del img_data, pix
         ocr_count += 1
+        return header_text
+
+    for pn in scan_pages:
+        if ocr_count >= max_ocr:
+            print(f"    [OCR] 최대 {max_ocr}회 도달, 탐색 중단")
+            break
+        if pn >= doc.page_count:
+            continue
+
+        header_text = _ocr_header(pn)
+        if header_text is None:
+            continue
 
         for form_id, keyword_sets in FORM_RULES:
             if any(all(kw in header_text for kw in kws) for kws in keyword_sets):
@@ -446,6 +623,82 @@ def classify_pages_ocr(doc, reader):
 
     if page_map:
         print(f"    [OCR page_map] {page_map} (OCR {ocr_count}회)")
+    return page_map
+
+
+def classify_pages_vision(doc):
+    """Vision LLM으로 스캔 PDF 페이지 분류 → 페이지 맵 반환
+
+    EasyOCR 기반 classify_pages_ocr보다 높은 정확도.
+    Vision LLM 서버 접속 불가 시 빈 dict 반환.
+    Returns: {"양식2-4": [38], "양식2-5_책임": [42], ...}
+    """
+    if not _check_vision_llm():
+        return {}
+
+    page_map = {}
+    REQUIRED_FORMS = {
+        "양식2-3", "양식2-4",
+        "양식2-5_책임", "양식2-5_보조", "양식2-5_비상주",
+        "양식2-6", "양식2-9", "양식2-10", "양식2-11",
+    }
+
+    # 양방향 스캔: 앞쪽 30% + 뒤쪽 45%
+    front_end = min(int(doc.page_count * 0.3), doc.page_count)
+    back_start = max(int(doc.page_count * 0.55), front_end)
+    scan_pages = list(range(front_end)) + list(range(back_start, doc.page_count))
+
+    vision_count = 0
+    max_vision = 60
+
+    for pn in scan_pages:
+        if vision_count >= max_vision:
+            print(f"    [Vision] 최대 {max_vision}회 도달, 탐색 중단")
+            break
+        if pn >= doc.page_count:
+            continue
+        # 내장 텍스트 있으면 스킵 (classify_pages에서 이미 처리)
+        if len(doc[pn].get_text().strip()) > 100:
+            continue
+
+        header = vision_classify_header(doc, pn)
+        vision_count += 1
+
+        if not header or '없음' in header:
+            continue
+
+        # 양식 번호 매핑
+        form_id = None
+        if '양식2-3' in header or '종합득점표' in header:
+            form_id = '양식2-3'
+        elif '양식2-11' in header or '교체빈도' in header:
+            form_id = '양식2-11'
+        elif '양식2-10' in header or '업무중첩도' in header:
+            form_id = '양식2-10'
+        elif '양식2-9' in header or '기술개발' in header:
+            form_id = '양식2-9'
+        elif '양식2-6' in header or '유사용역' in header:
+            form_id = '양식2-6'
+        elif '양식2-5' in header or '경력실적' in header:
+            if '책임' in header:
+                form_id = '양식2-5_책임'
+            elif '보조' in header:
+                form_id = '양식2-5_보조'
+            elif '비상주' in header:
+                form_id = '양식2-5_비상주'
+        elif '양식2-4' in header or ('참여감리원' in header and '자격' in header):
+            form_id = '양식2-4'
+
+        if form_id:
+            page_map.setdefault(form_id, []).append(pn)
+            print(f"    [Vision] p{pn+1} → {form_id}")
+
+        # 모든 양식을 찾았으면 조기 종료
+        if REQUIRED_FORMS.issubset(page_map.keys()):
+            break
+
+    if page_map:
+        print(f"    [Vision page_map] {page_map} (Vision {vision_count}회)")
     return page_map
 
 
@@ -1515,7 +1768,7 @@ def extract_personnel(doc):
     return personnel
 
 
-def extract_career_summary(doc):
+def extract_career_summary(doc, page_map=None):
     """책임감리원 경력실적사항(양식2-5) 추출 - PyMuPDF 텍스트 사용"""
     career = {
         "책임_전기분야_개월": 0,
@@ -1530,8 +1783,14 @@ def extract_career_summary(doc):
         "page": -1,
     }
 
-    page_num = smart_find_page(doc, ['양식2-5', '경력실적사항'],
-                                range(17, min(30, doc.page_count)), "경력실적")
+    # page_map 우선 → smart_find_page 폴백
+    page_num = -1
+    if page_map and "양식2-5_책임" in page_map:
+        page_num = page_map["양식2-5_책임"][0]
+        print(f"    [경력실적] page_map에서 p{page_num+1} 사용")
+    if page_num < 0:
+        page_num = smart_find_page(doc, ['양식2-5', '경력실적사항'],
+                                    range(17, min(30, doc.page_count)), "경력실적")
     if page_num < 0:
         page_num = smart_find_page(doc, ['책임감리원', '전기분야'],
                                     range(15, min(35, doc.page_count)), "경력실적(확장)")
@@ -1595,7 +1854,7 @@ def extract_career_summary(doc):
     return career
 
 
-def extract_asst_career(doc, chief_page):
+def extract_asst_career(doc, chief_page, page_map=None):
     """보조감리원 경력실적사항(양식2-5 보조) 추출"""
     result = {
         "보조_전기분야_년": 0, "보조_전기분야_점수": 0,
@@ -1605,13 +1864,18 @@ def extract_asst_career(doc, chief_page):
         "page": -1,
     }
 
-    # 책임감리원 페이지 다음부터 '보조감리원' 포함 양식2-5 탐색
-    start = max(chief_page + 1, 17)
-    page_num = smart_find_page(doc, ['양식2-5', '보조감리원'],
-                                range(start, min(start + 15, doc.page_count)), "보조감리원경력")
+    # page_map 우선 → smart_find_page 폴백
+    page_num = -1
+    if page_map and "양식2-5_보조" in page_map:
+        page_num = page_map["양식2-5_보조"][0]
+        print(f"    [보조경력] page_map에서 p{page_num+1} 사용")
     if page_num < 0:
-        page_num = smart_find_page(doc, ['보조감리원', '전기분야', '경력'],
-                                    range(start, min(start + 15, doc.page_count)), "보조감리원경력(확장)")
+        start = max(chief_page + 1, 17)
+        page_num = smart_find_page(doc, ['양식2-5', '보조감리원'],
+                                    range(start, min(start + 15, doc.page_count)), "보조감리원경력")
+        if page_num < 0:
+            page_num = smart_find_page(doc, ['보조감리원', '전기분야', '경력'],
+                                        range(start, min(start + 15, doc.page_count)), "보조감리원경력(확장)")
     if page_num < 0:
         return result
 
@@ -1688,7 +1952,7 @@ def extract_asst_career(doc, chief_page):
     return result
 
 
-def extract_nonres_career(doc, chief_page):
+def extract_nonres_career(doc, chief_page, page_map=None):
     """비상주감리원 경력실적사항(양식2-5 비상주) 추출"""
     result = {
         "비상주_전기분야_년": 0, "비상주_전기분야_점수": 0,
@@ -1696,20 +1960,22 @@ def extract_nonres_career(doc, chief_page):
         "page": -1,
     }
 
-    # 책임감리원 페이지 다음부터 탐색, '비상주감리원' 섹션 헤더가 있는 페이지 찾기
-    start = max(chief_page + 1, 17)
+    # page_map 우선 → 수동 텍스트 탐색 폴백
     page_num = -1
-    for pn in range(start, min(start + 25, doc.page_count)):
-        if pn >= doc.page_count:
-            break
-        text = doc[pn].get_text()
-        # '비상주감리원'이 섹션 헤더로 존재하는 페이지 (설명 텍스트 내 '비상주' 제외)
-        if '비상주감리원' in text and ('등' in text and '급' in text or '전기분야' in text):
-            # 책임/보조 페이지가 아닌지 확인
-            if '1. 책임감리원' not in text and '2. 보조감리원' not in text:
-                page_num = pn
-                print(f"    [비상주감리원경력] 페이지 {pn+1}에서 발견")
+    if page_map and "양식2-5_비상주" in page_map:
+        page_num = page_map["양식2-5_비상주"][0]
+        print(f"    [비상주경력] page_map에서 p{page_num+1} 사용")
+    if page_num < 0:
+        start = max(chief_page + 1, 17)
+        for pn in range(start, min(start + 25, doc.page_count)):
+            if pn >= doc.page_count:
                 break
+            text = get_page_text(doc, pn)
+            if '비상주감리원' in text and ('등' in text and '급' in text or '전기분야' in text):
+                if '1. 책임감리원' not in text and '2. 보조감리원' not in text:
+                    page_num = pn
+                    print(f"    [비상주감리원경력] 페이지 {pn+1}에서 발견")
+                    break
     if page_num < 0:
         return result
 
@@ -1754,7 +2020,7 @@ def extract_nonres_career(doc, chief_page):
     return result
 
 
-def extract_similar_project(doc):
+def extract_similar_project(doc, page_map=None):
     """유사용역 수행실적 추출 - 여러 페이지에 걸쳐 합계 찾기"""
     result = {
         "적용금액": 0,
@@ -1764,9 +2030,14 @@ def extract_similar_project(doc):
         "page": -1,
     }
 
-    # 유사용역 시작 페이지 찾기
-    start_page = smart_find_page(doc, ['유사용역실적', '유사용역', '환산금액'],
-                                range(20, min(int(doc.page_count * 0.5), doc.page_count)), "유사용역")
+    # page_map 우선 → smart_find_page 폴백
+    start_page = -1
+    if page_map and "양식2-6" in page_map:
+        start_page = page_map["양식2-6"][0]
+        print(f"    [유사용역] page_map에서 p{start_page+1} 사용")
+    if start_page < 0:
+        start_page = smart_find_page(doc, ['유사용역실적', '유사용역', '환산금액'],
+                                    range(20, min(int(doc.page_count * 0.5), doc.page_count)), "유사용역")
 
     if start_page >= 0:
         result["page"] = start_page + 1
@@ -1774,7 +2045,7 @@ def extract_similar_project(doc):
         # 시작 페이지부터 최대 10페이지 범위에서 모든 줄 수집
         all_lines = []
         for page_num in range(start_page, min(start_page + 10, doc.page_count)):
-            text = doc[page_num].get_text()
+            text = get_page_text(doc, page_num)
             if not text.strip():
                 break  # 빈 페이지 도달 시 중단
             all_lines.extend([l.strip() for l in text.split('\n') if l.strip()])
@@ -1926,7 +2197,7 @@ def extract_financial(doc):
     return result
 
 
-def extract_tech_development(doc, bidding_date=BIDDING_DATE):
+def extract_tech_development(doc, bidding_date=BIDDING_DATE, page_map=None):
     """기술개발 및 투자실적 추출 (양식2-9, 텍스트 페이지)
 
     반환 키:
@@ -1953,10 +2224,15 @@ def extract_tech_development(doc, bidding_date=BIDDING_DATE):
     except (ValueError, TypeError):
         bid_dt = datetime.now()
 
-    # 페이지 탐색: 양식2-9 또는 기술개발투자실적 키워드
-    tech_start = max(int(doc.page_count * 0.5), 40)
-    page_num = smart_find_page(doc, ['양식2-9', '기술개발투자실적', '개발실적'],
-                                range(tech_start, doc.page_count), "기술개발")
+    # page_map 우선 → smart_find_page 폴백
+    page_num = -1
+    if page_map and "양식2-9" in page_map:
+        page_num = page_map["양식2-9"][0]
+        print(f"    [기술개발] page_map에서 p{page_num+1} 사용")
+    if page_num < 0:
+        tech_start = max(int(doc.page_count * 0.5), 40)
+        page_num = smart_find_page(doc, ['양식2-9', '기술개발투자실적', '개발실적'],
+                                    range(tech_start, doc.page_count), "기술개발")
     if page_num < 0:
         return result
 
@@ -2150,7 +2426,7 @@ def extract_tech_development(doc, bidding_date=BIDDING_DATE):
     return result
 
 
-def extract_overlap(doc):
+def extract_overlap(doc, page_map=None):
     """업무중첩도 추출 (양식2-10)
     - 상주감리원: '실격' 키워드 탐지 → 없으면 6점 만점, 있으면 0점
     - 비상주감리원: '감리용역' 출현 횟수(비상주 섹션) → NONRESIDENT_OVERLAP_SCORE 적용
@@ -2166,14 +2442,20 @@ def extract_overlap(doc):
         "page": -1,
     }
 
-    overlap_start = max(int(doc.page_count * 0.55), 40)
-    page_num = smart_find_page(doc, ['양식2-10', '업무중첩도', '배치현황'],
-                                range(overlap_start, doc.page_count), "업무중첩도")
+    # page_map 우선 → smart_find_page 폴백
+    page_num = -1
+    if page_map and "양식2-10" in page_map:
+        page_num = page_map["양식2-10"][0]
+        print(f"    [업무중첩도] page_map에서 p{page_num+1} 사용")
+    if page_num < 0:
+        overlap_start = max(int(doc.page_count * 0.55), 40)
+        page_num = smart_find_page(doc, ['양식2-10', '업무중첩도', '배치현황'],
+                                    range(overlap_start, doc.page_count), "업무중첩도")
     if page_num < 0:
         return result
 
     result["page"] = page_num
-    text = doc[page_num].get_text()
+    text = get_page_text(doc, page_num)
     lines = [l.strip() for l in text.split('\n') if l.strip()]
 
     # 실격 탐지 (상주감리원 관련 컨텍스트)
@@ -2211,7 +2493,7 @@ def extract_overlap(doc):
     return result
 
 
-def extract_replacement(doc):
+def extract_replacement(doc, page_map=None):
     """교체빈도 추출 (양식2-11)
     - 가. 감리업체: '%' 라인 직전 숫자 = 교체빈도율 → REPLACEMENT_RATE_SCORE
     - 나. 참여감리원: 교체일(날짜) 카운트 → 상주×0.5 + 비상주×0.1 감점
@@ -2228,14 +2510,20 @@ def extract_replacement(doc):
         "page": -1,
     }
 
-    repl_start = max(int(doc.page_count * 0.6), 50)
-    page_num = smart_find_page(doc, ['양식2-11', '교체빈도율', '배치감리원수'],
-                                range(repl_start, doc.page_count), "교체빈도")
+    # page_map 우선 → smart_find_page 폴백
+    page_num = -1
+    if page_map and "양식2-11" in page_map:
+        page_num = page_map["양식2-11"][0]
+        print(f"    [교체빈도] page_map에서 p{page_num+1} 사용")
+    if page_num < 0:
+        repl_start = max(int(doc.page_count * 0.6), 50)
+        page_num = smart_find_page(doc, ['양식2-11', '교체빈도율', '배치감리원수'],
+                                    range(repl_start, doc.page_count), "교체빈도")
     if page_num < 0:
         return result
 
     result["page"] = page_num
-    text = doc[page_num].get_text()
+    text = get_page_text(doc, page_num)
     lines = [l.strip() for l in text.split('\n') if l.strip()]
 
     # 가. 감리업체 교체빈도율: '%' 직전 float 값
@@ -2716,6 +3004,24 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
     print(f"  → 기술개발: {summary['기술개발']}점, 업무중첩도: {summary['업무중첩도']}점")
     print(f"  → 교체빈도: {summary['교체빈도']}점, 가감점: {summary['가감점']}점")
     print(f"  → 업체제출 총점: {summary['총점']}")
+
+    # 스캔 PDF: Vision LLM 우선 → EasyOCR 폴백으로 page_map 보강
+    if is_scan_pdf:
+        vision_pmap = classify_pages_vision(doc)
+        if vision_pmap:
+            for k, v in vision_pmap.items():
+                if k not in page_map:
+                    page_map[k] = v
+        else:
+            # Vision LLM 접속 불가 시 EasyOCR 폴백
+            if reader is None:
+                reader = get_reader()
+            if reader:
+                ocr_pmap = classify_pages_ocr(doc, reader)
+                for k, v in ocr_pmap.items():
+                    if k not in page_map:
+                        page_map[k] = v
+
     print(f"  → 페이지 분류: {', '.join(f'{k}:p{v[0]+1}' for k,v in page_map.items() if v)}")
     _lap("종합득점표 + 페이지분류")
 
@@ -2744,7 +3050,7 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
     career = extract_career_v2(doc, page_map, "책임")
     if career is None:
         print("  → [v2 실패] 기존 방식으로 폴백")
-        career = extract_career_summary(doc)
+        career = extract_career_summary(doc, page_map)
     # 경력 텍스트 추출 실패 시: 참여감리원 OCR 데이터에서 경력 보충
     if career['책임_전기분야_개월'] == 0:
         scan_months = personnel["책임감리원"].get("전기경력_개월", 0)
@@ -2764,11 +3070,11 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
     asst_career = extract_career_v2(doc, page_map, "보조")
     if asst_career is None:
         chief_page = career["page"] - 1 if career["page"] > 0 else 17
-        asst_career = extract_asst_career(doc, chief_page)
+        asst_career = extract_asst_career(doc, chief_page, page_map)
     nonres_career = extract_career_v2(doc, page_map, "비상주")
     if nonres_career is None:
         chief_page = career["page"] - 1 if career["page"] > 0 else 17
-        nonres_career = extract_nonres_career(doc, chief_page)
+        nonres_career = extract_nonres_career(doc, chief_page, page_map)
 
     # 보조/비상주 경력도 OCR 폴백
     if asst_career['보조_전기분야_년'] == 0 and personnel["보조감리원"]:
@@ -2794,7 +3100,7 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
 
     # 5. 유사용역 실적 추출
     print("[5/5] 유사용역 수행실적 추출 중...")
-    similar = extract_similar_project(doc)
+    similar = extract_similar_project(doc, page_map)
     print(f"  → 적용금액: {similar['적용금액']:,}원")
     if similar["점수"] > 0:
         print(f"  → 평점: {similar['점수']}점")
@@ -2803,7 +3109,7 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
 
     # 5.5 기술개발 세부증빙 추출 (양식2-9)
     print("[5.5/5] 기술개발 세부증빙 추출 중...")
-    tech_dev = extract_tech_development(doc, bidding_date)
+    tech_dev = extract_tech_development(doc, bidding_date, page_map)
     if tech_dev["page"] > 0:
         print(f"  → p{tech_dev['page']}: 개발실적 {tech_dev['개발실적_항목수']}건 "
               f"→ {tech_dev['개발실적_계산점수']}점")
@@ -2817,13 +3123,13 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
 
     # 5.7 업무중첩도 세부증빙 추출 (양식2-10)
     print("[5.7/5] 업무중첩도 세부증빙 추출 중...")
-    overlap = extract_overlap(doc)
+    overlap = extract_overlap(doc, page_map)
 
     _lap("업무중첩도 추출")
 
     # 5.9 교체빈도 세부증빙 추출 (양식2-11)
     print("[5.9/5] 교체빈도 세부증빙 추출 중...")
-    replacement = extract_replacement(doc)
+    replacement = extract_replacement(doc, page_map)
 
     _lap("교체빈도 추출")
 

@@ -522,6 +522,62 @@
         }
         .modal-close:hover { color: #333; }
 
+        /* 실시간 로그 패널 */
+        .log-panel {
+            background: #1a1a2e;
+            border-radius: 12px;
+            padding: 16px 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            display: none;
+        }
+        .log-panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+        .log-panel-header h3 {
+            color: #8892b0;
+            font-size: 12px;
+            font-weight: 600;
+            margin: 0;
+        }
+        .log-panel-header .log-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            color: #64ffda;
+        }
+        .log-panel-header .log-dot {
+            width: 6px; height: 6px;
+            background: #64ffda;
+            border-radius: 50%;
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        .log-panel pre {
+            color: #a8d8b9;
+            font-size: 11.5px;
+            font-family: 'Consolas', 'D2Coding', monospace;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-break: break-all;
+            margin: 0;
+            max-height: 350px;
+            overflow-y: auto;
+        }
+        .log-panel pre .log-info { color: #8892b0; }
+        .log-panel pre .log-ok { color: #64ffda; }
+        .log-panel pre .log-warn { color: #f0ad4e; }
+        .log-panel pre .log-err { color: #ff6b6b; }
+        .log-panel pre .log-time { color: #5c6370; }
+        .log-panel pre .log-highlight { color: #c792ea; }
+
         @media (max-width: 768px) {
             .upload-grid { grid-template-columns: 1fr; }
             .summary-cards { grid-template-columns: repeat(2, 1fr); }
@@ -712,6 +768,18 @@
             </div>
         </div>
 
+        <!-- 실시간 실행 로그 -->
+        <div class="log-panel" id="logPanel">
+            <div class="log-panel-header">
+                <h3>실행 로그</h3>
+                <div class="log-status" id="logStatus">
+                    <span class="log-dot"></span>
+                    <span>실시간</span>
+                </div>
+            </div>
+            <pre id="liveLog"></pre>
+        </div>
+
         <!-- 결과 섹션 -->
         <div class="result-section" id="resultSection">
             <!-- 요약 카드 -->
@@ -855,6 +923,9 @@
             // 결과 섹션 숨기기
             document.getElementById('resultSection').style.display = 'none';
             document.getElementById('progressSection').style.display = 'none';
+            document.getElementById('logPanel').style.display = 'none';
+            document.getElementById('liveLog').textContent = '';
+            if (_logPollTimer) { clearInterval(_logPollTimer); _logPollTimer = null; }
 
             // 결과 내용 초기화
             document.getElementById('scoreItems').innerHTML = '';
@@ -940,6 +1011,44 @@
             if (text) document.getElementById('progressText').textContent = text;
         }
 
+        // ── 실시간 로그 폴링 ──
+        let _logPollTimer = null;
+        let _logOffset = 0;
+
+        function startLogPoll() {
+            _logOffset = 0;
+            const logEl = document.getElementById('liveLog');
+            logEl.textContent = '';
+            document.getElementById('logPanel').style.display = 'block';
+            document.getElementById('logStatus').innerHTML =
+                '<span class="log-dot"></span><span>실시간</span>';
+            _logPollTimer = setInterval(pollLogs, 400);
+        }
+
+        function stopLogPoll() {
+            if (_logPollTimer) { clearInterval(_logPollTimer); _logPollTimer = null; }
+            // 마지막 로그 수집
+            setTimeout(pollLogs, 500);
+            // 상태 표시 변경
+            document.getElementById('logStatus').innerHTML =
+                '<span style="color:#8892b0;">완료</span>';
+        }
+
+        async function pollLogs() {
+            try {
+                const r = await fetch('/api/logs?since=' + _logOffset);
+                const d = await r.json();
+                if (d.lines && d.lines.length > 0) {
+                    const el = document.getElementById('liveLog');
+                    d.lines.forEach(line => {
+                        el.textContent += line + '\n';
+                    });
+                    el.scrollTop = el.scrollHeight;
+                    _logOffset = d.total;
+                }
+            } catch(e) { /* 네트워크 오류 무시 */ }
+        }
+
         function extractBizNum(filename) {
             // 파일명에서 사업자번호(xxx-xx-xxxxx) 추출
             const m = filename.match(/(\d{3}-\d{2}-\d{5})/);
@@ -1004,6 +1113,9 @@
             progressEl.style.display = 'block';
             document.getElementById('resultSection').style.display = 'none';
 
+            // 실시간 로그 시작
+            startLogPoll();
+
             const totalFiles = pdfFiles.length;
             const biddingDate = document.getElementById('biddingDate').value;
             const costTier = document.getElementById('costTier').value;
@@ -1047,6 +1159,7 @@
             }
 
             setProgress(100, `${totalFiles}개 업체 분석 완료!`);
+            stopLogPoll();
             setTimeout(() => {
                 progressEl.style.display = 'none';
                 renderBatchResults(allResults);
@@ -1372,34 +1485,40 @@
             html += addRow('나. 부실벌점 (감점)', csPenalty, '-', penalty, { badge: BSkip, note: keeaNote });
 
             // ── 합계 & 총점 검증 ──
+            const hasExcel = (e.총점 || 0) > 0;
             const excelTotalComputed = partStated + (e.유사용역_점수||0) + tdStated + ovStated + chStated + bonus - penalty;
             const excelTotalStated   = e.총점 || 0;
-            const totalV = vSum(excelTotalComputed, excelTotalStated, 100);
             const pdfTotal = (p.참여감리원_소계||0) + (p.유사용역_점수||0) + (p.기술개발_점수||0) + (p.업무중첩_점수||0) + (p.교체빈도_점수||0) + (p.가점_자격증||0);
+
+            // Excel 있으면 Excel 검증, 없으면 PDF 기반 판정
+            const mainTotal = hasExcel ? excelTotalStated : pdfTotal;
+            const totalV = hasExcel
+                ? vSum(excelTotalComputed, excelTotalStated, 100)
+                : (pdfTotal > 0 ? { badge: BOk, note: 'PDF 기반' } : { badge: BSkip, note: '' });
 
             html += `<tr class="total-row">
                 <td colspan="2" style="text-align:center;font-weight:700;">합 계</td>
                 <td style="text-align:center;">85점</td>
                 <td>-</td>
                 <td>${n(pdfTotal)}</td>
-                <td>${n(excelTotalStated)}</td>
+                <td>${hasExcel ? n(excelTotalStated) : '-'}</td>
                 <td>${totalV.badge}</td>
                 <td style="font-size:11px;color:${totalV.note?'#c62828':'#888'};">${totalV.note}</td>
             </tr>`;
 
             // ── 적격여부 ──
-            const excelPf = excelTotalStated >= 80 ? '적격' : (excelTotalStated > 0 ? '실격' : '-');
-            const pfColor = excelPf === '적격' ? '#27ae60' : '#e74c3c';
-            const calcPf  = excelTotalComputed >= 80 ? '적격' : '실격';
-            const calcNote = totalV.note ? `계산값: ${excelTotalComputed.toFixed(1)}점 → ${calcPf}` : '';
+            const pfScore = hasExcel ? excelTotalStated : pdfTotal;
+            const pf = pfScore >= 80 ? '적격' : (pfScore > 0 ? '실격' : '-');
+            const pfColor = pf === '적격' ? '#27ae60' : (pf === '실격' ? '#e74c3c' : '#999');
+            const pfSource = hasExcel ? '' : (pdfTotal > 0 ? '(PDF 추출 기준)' : '');
             html += `<tr class="result-row">
                 <td colspan="2" style="text-align:center;font-size:13px;font-weight:700;">적격여부 (80점 이상)</td>
                 <td></td>
                 <td>-</td>
-                <td>-</td>
-                <td style="color:${pfColor};font-size:15px;font-weight:700;">${excelPf}</td>
-                <td>${excelPf !== '-' ? (excelPf==='적격'?BOk:BErr) : BSkip}</td>
-                <td style="font-size:11px;color:#c62828;">${calcNote}</td>
+                <td style="color:${pfColor};font-size:14px;font-weight:700;">${pdfTotal > 0 ? (pdfTotal >= 80 ? '적격' : '실격') : '-'}</td>
+                <td style="color:${pfColor};font-size:15px;font-weight:700;">${pf}</td>
+                <td>${pf !== '-' ? (pf==='적격'?BOk:BErr) : BSkip}</td>
+                <td style="font-size:11px;color:#888;">${pfSource}</td>
             </tr>`;
 
             // ── KEEA 확인서 진위여부 ──
