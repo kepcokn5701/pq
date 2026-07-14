@@ -1524,56 +1524,119 @@ def extract_company_name(doc):
     return "미확인"
 
 
-def extract_summary_table(doc):
-    """종합득점표(양식2-3) 추출 - 대괄호 배점 순서 기반"""
+def _try_parse_summary_page(doc, page_num):
+    """종합득점표 한 페이지 텍스트 파싱 시도 (내부 함수)
+
+    Returns: result dict (총점>0이면 성공) 또는 총점=0 dict
+    """
     result = {
-        "참여감리원": 0,    # [50]
-        "유사용역": 0,      # 1st [10]
-        "신용도": 0,        # 2nd [10]
-        "기술개발": 0,      # 3rd [10]
-        "업무중첩도": 0,    # 4th [10]
-        "교체빈도": 0,      # 1st [5]
-        "작업계획": 0,      # 2nd [5]
-        "가감점": 0,        # [  ]
-        "총점": 0,
-        "page": -1,
+        "참여감리원": 0, "유사용역": 0, "신용도": 0, "기술개발": 0,
+        "업무중첩도": 0, "교체빈도": 0, "작업계획": 0, "가감점": 0,
+        "총점": 0, "page": page_num + 1,
     }
+    lines = get_page_lines(doc, page_num)
+    if len(lines) < 10:
+        return result  # 표지 등 짧은 페이지 스킵
 
-    page_num = smart_find_page(doc, ['종합득점표', '양식2-3'],
-                                range(10, min(25, doc.page_count)), "종합득점표")
-    if page_num < 0:
-        page_num = smart_find_page(doc, ['종합득점표'],
-                                    range(0, min(30, doc.page_count)), "종합득점표(확장)")
+    category_order = ["참여감리원", "유사용역", "신용도", "기술개발",
+                      "업무중첩도", "교체빈도", "작업계획", "가감점"]
 
-    if page_num >= 0:
-        result["page"] = page_num + 1
-        lines = get_page_lines(doc, page_num)
+    # ── 방법1: 대괄호 [XX] 패턴 (표준 양식) ──
+    bracket_scores = []
+    for i, line in enumerate(lines):
+        m = re.match(r'^\s*\[(\d+|[\s]*)\]\s*$', line.strip())
+        if m:
+            bracket_val = m.group(1).strip()
+            for j in range(i+1, min(i+3, len(lines))):
+                score_m = re.match(r'^\s*(\d+\.?\d*)\s*$', lines[j].strip())
+                if score_m:
+                    bracket_scores.append((bracket_val, float(score_m.group(1))))
+                    break
+    for idx, (bv, score) in enumerate(bracket_scores):
+        if idx < len(category_order):
+            result[category_order[idx]] = score
 
-        # 대괄호 [XX] 패턴으로 배점 순서 추출
-        # 종합득점표 구조: [50] → [10] → [10] → [10] → [10] → [5] → [5] → [ ] → 100(총배점)
-        # 각 대괄호 다음 줄의 숫자가 업체제출 점수
-        bracket_scores = []  # (배점, 업체제출점수) 쌍
-        for i, line in enumerate(lines):
-            m = re.match(r'^\s*\[(\d+|[\s]*)\]\s*$', line.strip())
-            if m:
-                bracket_val = m.group(1).strip()
-                # 다음 줄에서 업체제출 점수 찾기
-                for j in range(i+1, min(i+3, len(lines))):
-                    score_m = re.match(r'^\s*(\d+\.?\d*)\s*$', lines[j].strip())
-                    if score_m:
-                        score = float(score_m.group(1))
-                        bracket_scores.append((bracket_val, score))
+    # ── 방법2: find_tables + 섹션 범위 합산 (대괄호 없는 양식) ──
+    if not bracket_scores:
+        page = doc[page_num]
+        tables = page.find_tables()
+        if tables and tables.tables:
+            tbl = tables[0]
+            df = tbl.extract()
+            ncols = len(df[0]) if df else 0
+
+            # 평점 컬럼 자동 감지: 합계행에서 100과 총점이 있는 컬럼 쌍
+            score_col = -1
+            alloc_col = -1
+            for row in df:
+                cells = [str(c).replace(' ', '').strip() if c else '' for c in row]
+                if '합계' in ''.join(cells):
+                    for ci in range(ncols):
+                        try:
+                            if float(cells[ci]) == 100:
+                                alloc_col = ci
+                        except (ValueError, TypeError):
+                            pass
+                        try:
+                            v = float(cells[ci])
+                            if 50 <= v <= 120 and v != 100:
+                                score_col = ci
+                                result["총점"] = v
+                        except (ValueError, TypeError):
+                            pass
+                    break
+            if score_col < 0 and alloc_col >= 0:
+                score_col = alloc_col + 1  # 배점 다음 열이 평점
+
+            # 섹션 헤더 위치 탐색 (가~아)
+            SECTIONS = [
+                ('참여감리원', ['참여감리원', '가.참여']),
+                ('유사용역', ['유사용역', '나.유사']),
+                ('신용도', ['신용도', '다.신용', '다.신 용']),
+                ('기술개발', ['기술개발', '라.기술']),
+                ('업무중첩도', ['업무중첩도', '마.업무중첩']),
+                ('교체빈도', ['교체빈도', '바.교체']),
+                ('작업계획', ['작업계획', '사.작업']),
+                ('가감점', ['가감점', '가점', '아.가감', '아.가점']),
+            ]
+            section_rows = []  # (row_idx, cat_name)
+            for cat, markers in SECTIONS:
+                for ri, row in enumerate(df):
+                    cells = [str(c).replace(' ', '').strip() if c else '' for c in row]
+                    row_text = ''.join(cells).replace(' ', '')
+                    if any(m.replace(' ', '') in row_text for m in markers):
+                        section_rows.append((ri, cat))
+                        break
+            section_rows.sort()
+
+            # 각 섹션의 평점 컬럼 합산
+            if score_col >= 0 and section_rows:
+                합계_row = len(df)
+                for ri, row in enumerate(df):
+                    cells = [str(c).replace(' ', '').strip() if c else '' for c in row]
+                    if '합계' in ''.join(cells).replace(' ', ''):
+                        합계_row = ri
                         break
 
-        # 순서대로 매핑: [50], [10]x4, [5]x2, [ ]
-        # 항목 이름 순서 (종합득점표 표준)
-        category_order = ["참여감리원", "유사용역", "신용도", "기술개발",
-                          "업무중첩도", "교체빈도", "작업계획", "가감점"]
-        for idx, (bv, score) in enumerate(bracket_scores):
-            if idx < len(category_order):
-                result[category_order[idx]] = score
+                for si, (start_ri, cat) in enumerate(section_rows):
+                    end_ri = section_rows[si + 1][0] if si + 1 < len(section_rows) else 합계_row
+                    score_sum = 0.0
+                    for ri in range(start_ri, end_ri):
+                        try:
+                            cell_val = str(df[ri][score_col]).replace(' ', '').strip() if df[ri][score_col] else ''
+                            if cell_val and cell_val != '-':
+                                v = float(cell_val)
+                                if -10 <= v <= 55:
+                                    score_sum += v
+                        except (ValueError, TypeError):
+                            pass
+                    if cat == '가감점':
+                        result[cat] = round(score_sum, 2)
+                    else:
+                        result[cat] = round(score_sum, 1) if score_sum > 0 else 0
 
-        # 총점: "100" 다음 줄
+    # ── 총점 추출: "100" 다음 줄 (텍스트 기반 폴백) ──
+    if result["총점"] == 0:
         for i, line in enumerate(lines):
             if line.strip() == '100':
                 for j in range(i+1, min(i+3, len(lines))):
@@ -1583,8 +1646,65 @@ def extract_summary_table(doc):
                         if 50 <= val <= 120:
                             result["총점"] = val
                             break
+                if result["총점"] > 0:
+                    break
+
+    # ── 총점 추출: "합 계" 같은 줄에서 숫자 찾기 (폴백2) ──
+    if result["총점"] == 0:
+        for i, line in enumerate(lines):
+            clean = line.replace(' ', '')
+            if '합계' in clean:
+                # 같은 줄에 숫자가 있으면
+                nums = re.findall(r'\d+\.?\d*', line)
+                for n in reversed(nums):
+                    v = float(n)
+                    if 50 <= v <= 120:
+                        result["총점"] = v
+                        break
+                if result["총점"] == 0:
+                    # 다음 줄에서 찾기
+                    for j in range(i+1, min(i+3, len(lines))):
+                        m = re.match(r'^\s*(\d+\.?\d*)\s*$', lines[j].strip())
+                        if m:
+                            v = float(m.group(1))
+                            if 50 <= v <= 120:
+                                result["총점"] = v
+                                break
+                if result["총점"] > 0:
+                    break
 
     return result
+
+
+def extract_summary_table(doc):
+    """종합득점표(양식2-3) 추출 - 여러 파싱 방법 + 다음 페이지 폴백"""
+    page_num = smart_find_page(doc, ['종합득점표', '양식2-3'],
+                                range(10, min(25, doc.page_count)), "종합득점표")
+    if page_num < 0:
+        page_num = smart_find_page(doc, ['종합득점표'],
+                                    range(0, min(30, doc.page_count)), "종합득점표(확장)")
+
+    if page_num >= 0:
+        # 찾은 페이지에서 파싱 시도
+        result = _try_parse_summary_page(doc, page_num)
+        if result["총점"] > 0:
+            return result
+
+        # 실패 시: 표지 페이지일 수 있으므로 다음 페이지도 시도
+        if page_num + 1 < doc.page_count:
+            result2 = _try_parse_summary_page(doc, page_num + 1)
+            if result2["총점"] > 0:
+                print(f"    [종합득점표] p{page_num+1} 파싱 실패 → p{page_num+2}에서 성공")
+                return result2
+
+        # 둘 다 실패하면 첫 페이지 결과 반환 (page 정보 유지)
+        return result
+
+    return {
+        "참여감리원": 0, "유사용역": 0, "신용도": 0, "기술개발": 0,
+        "업무중첩도": 0, "교체빈도": 0, "작업계획": 0, "가감점": 0,
+        "총점": 0, "page": -1,
+    }
 
 
 def _parse_summary_page_ocr(doc, reader, pn):
