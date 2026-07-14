@@ -371,6 +371,8 @@ def ocr_page_to_lines(doc, page_num, zoom=1.5):
 _vision_model_name = None
 _vision_available = None  # None=미확인, True/False
 _vision_cache = {}  # (doc_id, page_num, prompt_key) → text
+_vision_consecutive_fails = 0  # 연속 실패 횟수 → 2회 이상 시 비활성화
+_vision_first_call = True  # 첫 호출 여부 (모델 로딩 대기 60초)
 
 
 def _check_vision_llm():
@@ -414,6 +416,7 @@ def vision_ocr_page(doc, page_num, prompt=None, zoom=2.0):
     Returns:
         추출된 텍스트 문자열 (실패 시 빈 문자열)
     """
+    global _vision_consecutive_fails, _vision_available, _vision_first_call
     if not _check_vision_llm():
         return ""
     if page_num >= doc.page_count:
@@ -456,21 +459,32 @@ def vision_ocr_page(doc, page_num, prompt=None, zoom=2.0):
         "temperature": 0.0,
     }
 
+    # 첫 호출: 모델 로딩 대기 60초, 이후: 30초
+    timeout = 60 if _vision_first_call else 30
     try:
         resp = _requests.post(
             f"{VISION_LLM_URL}/v1/chat/completions",
             json=payload,
-            timeout=120,
+            timeout=timeout,
         )
         del img_b64
+        _vision_first_call = False
         if resp.status_code == 200:
             text = resp.json()["choices"][0]["message"]["content"]
             _vision_cache[cache_key] = text
+            _vision_consecutive_fails = 0
             return text
         else:
             print(f"  [Vision LLM] p{page_num+1} 오류: HTTP {resp.status_code}")
+            _vision_consecutive_fails += 1
     except Exception as e:
         print(f"  [Vision LLM] p{page_num+1} 호출 실패: {e}")
+        _vision_consecutive_fails += 1
+
+    # 연속 실패 시 이후 호출 차단
+    if _vision_consecutive_fails >= 2:
+        _vision_available = False
+        print(f"  [Vision LLM] 연속 {_vision_consecutive_fails}회 실패 → 비활성화 (EasyOCR 폴백)")
 
     return ""
 
@@ -481,6 +495,7 @@ def vision_classify_header(doc, page_num):
     전체 페이지 대신 헤더만 전송 → 속도 4배 향상.
     Returns: Vision LLM 응답 문자열 (양식 번호 포함) 또는 빈 문자열
     """
+    global _vision_consecutive_fails, _vision_available, _vision_first_call
     if not _check_vision_llm():
         return ""
     if page_num >= doc.page_count:
@@ -527,18 +542,26 @@ def vision_classify_header(doc, page_num):
         "temperature": 0.0,
     }
 
+    # 첫 호출: 모델 로딩 대기 60초, 이후: 15초
+    timeout = 60 if _vision_first_call else 15
     try:
         resp = _requests.post(
             f"{VISION_LLM_URL}/v1/chat/completions",
-            json=payload, timeout=60
+            json=payload, timeout=timeout
         )
         del img_b64
+        _vision_first_call = False
         if resp.status_code == 200:
             text = resp.json()["choices"][0]["message"]["content"]
             _vision_cache[cache_key] = text
+            _vision_consecutive_fails = 0
             return text
     except Exception as e:
-        print(f"  [Vision] p{page_num+1} 헤더 분류 실패: {e}")
+        print(f"  [Vision] p{page_num+1} 헤더 분류 실패 (timeout={timeout}s): {e}")
+        _vision_consecutive_fails += 1
+        if _vision_consecutive_fails >= 2:
+            _vision_available = False
+            print(f"  [Vision LLM] 연속 {_vision_consecutive_fails}회 실패 → 비활성화 (EasyOCR 폴백)")
 
     return ""
 
@@ -3075,6 +3098,12 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
 
     import time as _t
     _t0 = _t.time()
+
+    # Vision LLM 상태 초기화 (이전 분석의 실패 상태 리셋)
+    global _vision_available, _vision_consecutive_fails, _vision_first_call
+    _vision_available = None
+    _vision_consecutive_fails = 0
+    _vision_first_call = True
 
     doc = fitz.open(pdf_path)
     print(f"[INFO] PDF 열림: 총 {doc.page_count} 페이지\n")
