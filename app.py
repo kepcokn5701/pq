@@ -681,9 +681,18 @@ def cross_verify(pdf_data, excel_data):
         0, tolerance=0.1)
     items.append(item)
 
-    # 총점 (신용도 제외)
-    item = _compare_numeric("합계", "총점 (신용도 제외)",
-        _calc_pdf_total(pdf_data), excel_data.get("총점", 0),
+    # 총점 (배전 직군: 신용도·작업기법 제외)
+    excel_total_adj = (
+        _safe_num(excel_data.get("참여감리원_소계", 0))
+        + _safe_num(excel_data.get("유사용역_점수", 0))
+        + _safe_num(excel_data.get("기술개발_점수", 0))
+        + _safe_num(excel_data.get("업무중첩_점수", 0))
+        + _safe_num(excel_data.get("교체빈도_점수", 0))
+        + _safe_num(excel_data.get("가점_자격증", 0))
+        + _safe_num(excel_data.get("부실벌점", 0))
+    ) if excel_data.get("총점", 0) else 0
+    item = _compare_numeric("합계", "총점 (신용도·작업기법 제외)",
+        _calc_pdf_total(pdf_data), excel_total_adj or excel_data.get("총점", 0),
         tolerance=1.0, severity="error")
     _add_criteria(item, None)
     items.append(item)
@@ -758,7 +767,7 @@ def _compare_numeric(category, item_name, pdf_val, excel_val, tolerance=0, sever
 
 
 def _calc_pdf_total(pdf_data):
-    """PDF 추출 데이터 기반 총점 계산 (신용도/작업계획 제외)"""
+    """PDF 추출 데이터 기반 총점 계산 (배전 직군: 신용도·작업기법 비평가)"""
     total = 0
     total += _safe_num(pdf_data.get("참여감리원_소계", 0))
     total += _safe_num(pdf_data.get("유사용역_점수", 0))

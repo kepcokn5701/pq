@@ -1191,6 +1191,85 @@ def _parse_edu_dates(cell_value):
     return general, special
 
 
+def _parse_personnel_compact(rows, page_num, personnel):
+    """7열 이하 간소화 양식2-4 파싱 (대림엠이씨 등)
+
+    cell[0]에 역할명과 (이름)이 합쳐진 형태:
+      "등 급 특급 (-)\n책임감리원(25점) ...\n(이한성) ..."
+    등급은 cell[2], 경력년수는 cell[2]의 숫자행에서 추출
+    """
+    current_role = None
+    bozo_person = None
+
+    for i, row in enumerate(rows):
+        cell0 = (row[0] or '').strip()
+
+        # 역할 감지 (cell[0]에 역할 키워드)
+        new_role = None
+        if '책임감리원' in cell0:
+            new_role = '책임'
+        elif '보조감리원' in cell0:
+            new_role = '보조'
+        elif '비상주' in cell0 and '감리' in cell0:
+            new_role = '비상주'
+
+        if new_role:
+            current_role = new_role
+            if new_role == '보조':
+                bozo_person = {"성명": "", "등급": "", "경력일수": ""}
+                personnel["보조감리원"].append(bozo_person)
+
+            # cell[0]에서 괄호 이름 추출: (이한성), (노문교) 등
+            name_m = re.search(r'\(([가-힣]{2,4})\)', cell0)
+            name = name_m.group(1) if name_m else ""
+
+            # 등급: cell[2] 또는 cell[0]에서 추출
+            grade = ""
+            for g in ('특급', '고급', '중급', '초급'):
+                cell2 = (row[2] if len(row) > 2 else '') or ''
+                if g in cell2:
+                    grade = g
+                    break
+                if g in cell0:
+                    grade = g
+                    break
+
+            if current_role == '책임':
+                p = personnel["책임감리원"]
+                if name:
+                    p["성명"] = name
+                if grade:
+                    p["등급"] = grade
+            elif current_role == '보조' and bozo_person:
+                if name:
+                    bozo_person["성명"] = name
+                if grade:
+                    bozo_person["등급"] = grade
+            elif current_role == '비상주':
+                p = personnel["비상주감리원"]
+                if name:
+                    p["성명"] = name
+                if grade:
+                    p["등급"] = grade
+
+        if current_role is None:
+            continue
+
+    # 검증: 최소한 책임감리원 이름+등급
+    if not personnel["책임감리원"]["성명"] or not personnel["책임감리원"]["등급"]:
+        return None
+
+    personnel["page"] = page_num + 1
+    personnel["교육수료"] = []
+
+    print(f"    [v2-compact] 책임: {personnel['책임감리원']['성명']}/{personnel['책임감리원']['등급']}, "
+          f"보조: {personnel['보조감리원'][0]['성명'] if personnel['보조감리원'] else '-'}/"
+          f"{personnel['보조감리원'][0]['등급'] if personnel['보조감리원'] else '-'}, "
+          f"비상주: {personnel['비상주감리원']['성명']}/{personnel['비상주감리원']['등급']}")
+
+    return personnel
+
+
 def extract_personnel_v2(doc, page_map):
     """양식2-4 find_tables() 기반 인력 추출 — 업체별 양식 차이 자동 대응
 
@@ -1221,8 +1300,15 @@ def extract_personnel_v2(doc, page_map):
         return None
 
     rows = tables.tables[0].extract()
-    if len(rows) < 4 or len(rows[0]) < 10:
+    if len(rows) < 4:
         return None
+
+    num_cols = len(rows[0])
+
+    # ─── 7열 이하 테이블: 대림엠이씨 등 간소화 양식 ───
+    # cell[0]에 역할명+이름이 합쳐진 형태: "책임감리원(25점)\n(이한성)"
+    if num_cols < 10:
+        return _parse_personnel_compact(rows, page_num, personnel)
 
     current_role = None
     bozo_person = None  # 현재 보조감리원 dict 참조
@@ -3452,7 +3538,9 @@ def analyze_company(pdf_path, bidding_date=BIDDING_DATE, cost_tier=COST_TIER):
         "참여감리원_소계": summary["참여감리원"],
         "영업정지": sanctions["업체_영업정지"],
         "가점_자격증": cert_bonus,
-        "업체제출_총점": summary["총점"],
+        # 배전 직군: 신용도(10점)와 작업기법(5점)은 비평가 항목 → 총점에서 제외
+        "업체제출_총점": round(summary["총점"] - summary.get("신용도", 0) - summary.get("작업계획", 0), 2),
+        "업체제출_총점_원본": summary["총점"],  # 종합득점표 원본 총점 (참고용)
         # 기술개발 세부증빙 (양식2-9 독립 추출)
         "기술투자_비율": tech_dev["투자비율"],
         "기술투자_투자액": tech_dev["투자액_합계"],
@@ -3632,7 +3720,7 @@ def export_to_excel(result, output_path):
         ('유사용역 적용금액', f"{result['유사용역_적용금액']:,}원", ''),
         ('영업정지', result['영업정지'], ''),
         ('---합계---', '', ''),
-        ('업체제출 총점', result['업체제출_총점'], '100점 만점 기준'),
+        ('업체제출 총점', result['업체제출_총점'], '배전: 신용도·작업기법 제외'),
     ]
 
     for i, (item, val, note) in enumerate(detail_rows, 2):
@@ -3672,7 +3760,7 @@ def print_csv_result(result):
     print(f"9. [근거페이지]: 종합득점표 p{pages['종합득점표']}, 참여감리원 p{pages['참여감리원']}, "
           f"경력실적 p{pages['경력실적']}")
 
-    print(f"\n[업체제출 총점]: {result['업체제출_총점']}점")
+    print(f"\n[업체제출 총점]: {result['업체제출_총점']}점 (배전: 신용도·작업기법 제외, 원본 {result.get('업체제출_총점_원본', '?')}점)")
 
 
 ###############################################################################
