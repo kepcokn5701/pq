@@ -605,12 +605,15 @@ def get_page_lines(doc, page_num):
 ###############################################################################
 
 def smart_find_page(doc, keywords, search_range, label=""):
-    """핵심 페이지를 빠르게 찾기 - PyMuPDF 내장 텍스트만 사용 (OCR 없음, 크래시 방지)"""
+    """핵심 페이지를 빠르게 찾기 - PyMuPDF 내장 텍스트만 사용 (OCR 없음)
+    공백 제거 후 매칭하여 "종합 평가표" → "종합평가표" 등 변형 대응
+    """
     for page_num in search_range:
         if page_num >= doc.page_count:
             break
-        text = doc[page_num].get_text()  # OCR 폴백 없이 내장 텍스트만
-        if any(kw in text for kw in keywords):
+        text = doc[page_num].get_text()
+        text_ns = text.replace(' ', '')  # 공백 제거
+        if any(kw in text or kw in text_ns for kw in keywords):
             if label:
                 print(f"    [{label}] 페이지 {page_num+1}에서 발견")
             return page_num
@@ -620,66 +623,103 @@ def smart_find_page(doc, keywords, search_range, label=""):
 def classify_pages(doc):
     """전체 페이지를 스캔하여 양식별로 분류 → 페이지 맵 반환
 
-    Returns: {"양식2-4": [16], "양식2-5_책임": [20], ...}
+    양식 번호 대신 내용 키워드 기반 매칭 — 공백 제거 후 비교하여
+    "배 점"→"배점", "종합 평가표"→"종합평가표" 등 공백 변형에도 대응.
+
+    Returns: {"양식2-3": [16], "양식2-4": [20], ...}
     """
     page_map = {}
-    # 우선순위 순서: 종합득점표 먼저 매칭 → 세부 양식
-    # 각 규칙은 OR 관계의 키워드 세트 목록 (세트 내부는 AND)
+
+    # 내용 키워드 기반 규칙 (양식 번호 의존 최소화)
+    # 키워드는 공백 제거 후 매칭 — 각 세트는 AND, 세트 간은 OR
     FORM_RULES = [
-        # 종합득점표를 가장 먼저 매칭하여 다른 양식과의 오매칭 방지
-        # 데이터 페이지도 인식: 배점+합계+여러 심사항목 키워드 동시 존재
-        ("양식2-3", [["종합득점표"], ["양식2-3"],
-                     ["배점", "합계", "참여감리원", "유사용역"],
-                     ["배점", "합계", "기술개발", "교체빈도"]]),
-        # 참여감리원 — 양식번호 없어도 내용으로 매칭
-        ("양식2-4", [["양식2-4"], ["참여감리원", "자격사항", "자격등급"],
-                     ["참여감리원", "책임감리원", "보조감리원"],
-                     ["참여감리원", "특급"], ["참여감리원", "고급"],
-                     ["참여감리원", "등급"]]),
-        # 경력 세부 — 양식번호 없으면 "X. 책임/보조/비상주" 패턴으로 매칭
-        ("양식2-5_책임", [["양식2-5", "1. 책임감리원"], ["양식2-5", "책임감리원"],
-                         ["1. 책임감리원", "경력"]]),
-        ("양식2-5_보조", [["양식2-5", "2. 보조감리원"], ["양식2-5", "보조감리원"],
-                         ["2. 보조감리원", "경력"]]),
-        ("양식2-5_비상주", [["3. 비상주감리원"], ["양식2-5", "비상주감리원"],
-                           ["비상주감리원", "경력", "등급"]]),
-        # 유사용역 — "환산금액" 또는 "용역금액" 단독 매칭 가능
-        ("양식2-6", [["유사용역", "환산금액"], ["양식2-6"],
-                     ["유사용역", "사정금액"], ["유사용역", "용역금액"],
-                     ["환산금액", "사정금액"]]),
-        # 기술개발 — 넓은 매칭
-        ("양식2-9", [["양식2-9"], ["기술개발투자실적"],
-                     ["특허", "유효기간"], ["실용신안", "유효기간"],
-                     ["기술투자", "매출액"], ["(A)", "(B)", "매출"]]),
-        # 업무중첩도 — 단독 키워드 가능 (종합득점표에서 이미 걸러짐)
-        ("양식2-10", [["양식2-10"], ["업무중첩도", "배치현황"],
-                      ["업무중첩도", "동시수행"], ["업무중첩도", "해당"]]),
-        # 교체빈도 — 단독 키워드 가능
-        ("양식2-11", [["양식2-11", "교체빈도"], ["양식2-11"],
-                      ["교체빈도", "교체율"], ["교체빈도", "해당"]]),
+        # 종합평가표/종합득점표 — 가장 먼저 매칭하여 오매칭 방지
+        ("양식2-3", [
+            ["종합득점표"],
+            ["종합평가표"],
+            ["배점", "합계", "참여감리원", "유사용역"],
+            ["배점", "합계", "기술개발", "교체빈도"],
+            ["배점", "평점", "참여감리원", "유사용역", "기술개발"],
+        ]),
+        # 참여감리원 세부항목평가표
+        ("양식2-4", [
+            ["책임감리원", "보조감리원", "전기분야경력"],
+            ["책임감리원", "보조감리원", "평점소계"],
+            ["참여감리원", "책임감리원", "등급"],
+            ["참여감리원", "자격사항"],
+        ]),
+        # 경력실적 — 책임/보조/비상주 개별
+        ("양식2-5_책임", [
+            ["책임감리원", "경력", "기간", "발주처"],
+            ["1.책임감리원", "경력"],
+            ["책임감리원", "용역명", "경력기간"],
+        ]),
+        ("양식2-5_보조", [
+            ["보조감리원", "경력", "기간", "발주처"],
+            ["2.보조감리원", "경력"],
+            ["보조감리원", "용역명", "경력기간"],
+        ]),
+        ("양식2-5_비상주", [
+            ["비상주감리원", "경력", "등급"],
+            ["3.비상주감리원"],
+            ["비상주감리원", "용역명", "경력기간"],
+        ]),
+        # 유사용역 수행실적
+        ("양식2-6", [
+            ["유사용역", "환산금액"],
+            ["유사용역", "사정금액"],
+            ["유사용역", "용역금액"],
+            ["환산금액", "사정금액"],
+        ]),
+        # 기술개발 및 투자실적
+        ("양식2-9", [
+            ["기술개발투자실적"],
+            ["기술개발", "투자실적"],
+            ["특허", "유효기간"],
+            ["실용신안", "유효기간"],
+            ["기술투자", "매출액"],
+            ["개발실적", "투자실적", "교육실적"],
+        ]),
+        # 업무중첩도
+        ("양식2-10", [
+            ["업무중첩도", "배치현황"],
+            ["업무중첩도", "동시수행"],
+            ["업무중첩도", "상주감리원"],
+        ]),
+        # 교체빈도
+        ("양식2-11", [
+            ["교체빈도", "교체율"],
+            ["교체빈도", "교체건수"],
+            ["교체빈도", "감리업체"],
+        ]),
     ]
-    # 1차: 종합득점표 페이지 선제 식별
+
+    def _match_page(text_nospace, keyword_sets):
+        """공백 제거된 텍스트에서 키워드 세트 매칭"""
+        return any(all(kw in text_nospace for kw in kws) for kws in keyword_sets)
+
+    # 1차: 종합평가표 페이지 선제 식별
     summary_pages = set()
     for pn in range(doc.page_count):
         text = doc[pn].get_text()
         if not text.strip():
             continue
-        summary_rules = FORM_RULES[0][1]  # 양식2-3 규칙
-        if any(all(kw in text for kw in kws) for kws in summary_rules):
+        text_ns = text.replace(' ', '')  # 공백 제거
+        if _match_page(text_ns, FORM_RULES[0][1]):
             page_map.setdefault("양식2-3", []).append(pn)
             summary_pages.add(pn)
 
-    # 2차: 나머지 양식 매칭 (종합득점표/표지 페이지 제외, 중복 매칭 허용)
+    # 2차: 나머지 양식 매칭 (종합평가표 페이지 제외)
     for pn in range(doc.page_count):
         if pn in summary_pages:
             continue
         text = doc[pn].get_text()
-        if len(text.strip()) < 100:  # 표지·목차 등 짧은 페이지 제외
+        if len(text.strip()) < 50:
             continue
+        text_ns = text.replace(' ', '')
         for form_id, keyword_sets in FORM_RULES[1:]:
-            if any(all(kw in text for kw in kws) for kws in keyword_sets):
+            if _match_page(text_ns, keyword_sets):
                 page_map.setdefault(form_id, []).append(pn)
-                # break 없음 — 한 페이지가 여러 양식에 매칭 가능
     return page_map
 
 
@@ -1191,37 +1231,40 @@ def _parse_edu_dates(cell_value):
     return general, special
 
 
-def _parse_personnel_compact(rows, page_num, personnel):
-    """7열 이하 간소화 양식2-4 파싱 (대림엠이씨 등)
+def _parse_personnel_compact(all_tables, page_num, personnel):
+    """7열 이하 간소화 양식2-4 파싱 (대림엠이씨/세창/동훈 등)
 
-    cell[0]에 역할명과 (이름)이 합쳐진 형태:
-      "등 급 특급 (-)\n책임감리원(25점) ...\n(이한성) ..."
-    등급은 cell[2], 경력년수는 cell[2]의 숫자행에서 추출
+    여러 테이블을 순회하며 역할별 성명/등급 추출.
+    이름 형식 지원:
+      - "(이한성)" — 괄호 안 이름
+      - "(성 명 : 박병모)" — 성명 레이블 포함
+      - "책임감리원(25점)\\n(이한성)" — 역할행 내 이름
     """
-    current_role = None
-    bozo_person = None
+    for rows in all_tables:
+        for i, row in enumerate(rows):
+            cell0 = (row[0] or '').strip()
 
-    for i, row in enumerate(rows):
-        cell0 = (row[0] or '').strip()
+            # 역할 감지 (cell[0]에 역할 키워드)
+            role = None
+            if '책임감리원' in cell0:
+                role = '책임'
+            elif '보조감리원' in cell0:
+                role = '보조'
+            elif '비상주' in cell0 and '감리' in cell0:
+                role = '비상주'
 
-        # 역할 감지 (cell[0]에 역할 키워드)
-        new_role = None
-        if '책임감리원' in cell0:
-            new_role = '책임'
-        elif '보조감리원' in cell0:
-            new_role = '보조'
-        elif '비상주' in cell0 and '감리' in cell0:
-            new_role = '비상주'
+            if not role:
+                continue
 
-        if new_role:
-            current_role = new_role
-            if new_role == '보조':
-                bozo_person = {"성명": "", "등급": "", "경력일수": ""}
-                personnel["보조감리원"].append(bozo_person)
-
-            # cell[0]에서 괄호 이름 추출: (이한성), (노문교) 등
-            name_m = re.search(r'\(([가-힣]{2,4})\)', cell0)
-            name = name_m.group(1) if name_m else ""
+            # 이름 추출: "(성 명 : 박병모)" 또는 "(박병모)"
+            name = ""
+            name_m = re.search(r'성\s*명\s*[：:]\s*([가-힣]{2,4})', cell0)
+            if name_m:
+                name = name_m.group(1)
+            else:
+                name_m = re.search(r'\(([가-힣]{2,4})\)', cell0)
+                if name_m:
+                    name = name_m.group(1)
 
             # 등급: cell[2] 또는 cell[0]에서 추출
             grade = ""
@@ -1234,26 +1277,25 @@ def _parse_personnel_compact(rows, page_num, personnel):
                     grade = g
                     break
 
-            if current_role == '책임':
-                p = personnel["책임감리원"]
-                if name:
-                    p["성명"] = name
-                if grade:
-                    p["등급"] = grade
-            elif current_role == '보조' and bozo_person:
-                if name:
-                    bozo_person["성명"] = name
-                if grade:
-                    bozo_person["등급"] = grade
-            elif current_role == '비상주':
-                p = personnel["비상주감리원"]
-                if name:
-                    p["성명"] = name
-                if grade:
-                    p["등급"] = grade
+            # 빈 보조감리원 건너뛰기 (성명 없으면 미배치)
+            if role == '보조' and not name:
+                continue
 
-        if current_role is None:
-            continue
+            if role == '책임':
+                p = personnel["책임감리원"]
+                if name and not p["성명"]:
+                    p["성명"] = name
+                if grade and not p["등급"]:
+                    p["등급"] = grade
+            elif role == '보조':
+                bozo = {"성명": name, "등급": grade, "경력일수": ""}
+                personnel["보조감리원"].append(bozo)
+            elif role == '비상주':
+                p = personnel["비상주감리원"]
+                if name and not p["성명"]:
+                    p["성명"] = name
+                if grade and not p["등급"]:
+                    p["등급"] = grade
 
     # 검증: 최소한 책임감리원 이름+등급
     if not personnel["책임감리원"]["성명"] or not personnel["책임감리원"]["등급"]:
@@ -1300,15 +1342,25 @@ def extract_personnel_v2(doc, page_map):
         return None
 
     rows = tables.tables[0].extract()
-    if len(rows) < 4:
+    if len(rows) < 3:
         return None
 
     num_cols = len(rows[0])
 
-    # ─── 7열 이하 테이블: 대림엠이씨 등 간소화 양식 ───
-    # cell[0]에 역할명+이름이 합쳐진 형태: "책임감리원(25점)\n(이한성)"
+    # ─── 7열 이하 테이블: 간소화 양식 (대림엠이씨/세창/동훈 등) ───
+    # 여러 테이블 + 다음 페이지 테이블까지 수집하여 역할별 파싱
     if num_cols < 10:
-        return _parse_personnel_compact(rows, page_num, personnel)
+        all_tables = [t.extract() for t in tables.tables]
+        # 비상주감리원이 다음 페이지에 있을 수 있음 → 다음 페이지 테이블도 추가
+        if page_num + 1 < doc.page_count:
+            next_tables = doc[page_num + 1].find_tables()
+            if next_tables.tables:
+                for nt in next_tables.tables:
+                    nr = nt.extract()
+                    # 비상주감리원이 포함된 테이블만 추가
+                    if any('비상주' in (r[0] or '') for r in nr):
+                        all_tables.append(nr)
+        return _parse_personnel_compact(all_tables, page_num, personnel)
 
     current_role = None
     bozo_person = None  # 현재 보조감리원 dict 참조
@@ -1763,11 +1815,11 @@ def _try_parse_summary_page(doc, page_num):
 
 
 def extract_summary_table(doc):
-    """종합득점표(양식2-3) 추출 - 여러 파싱 방법 + 다음 페이지 폴백"""
-    page_num = smart_find_page(doc, ['종합득점표', '양식2-3'],
+    """종합득점표/종합평가표 추출 - 여러 파싱 방법 + 다음 페이지 폴백"""
+    page_num = smart_find_page(doc, ['종합득점표', '종합평가표'],
                                 range(10, min(25, doc.page_count)), "종합득점표")
     if page_num < 0:
-        page_num = smart_find_page(doc, ['종합득점표'],
+        page_num = smart_find_page(doc, ['종합득점표', '종합평가표'],
                                     range(0, min(30, doc.page_count)), "종합득점표(확장)")
 
     if page_num >= 0:
